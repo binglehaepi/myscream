@@ -237,6 +237,27 @@ function staffY(midi, top, staffH) {
 }
 
 const PREPARED_STAFF_LINES = 5;
+const NOTE_BEAD_DUR = 0.16;
+const NOTE_LAYOUT_W = 30;
+
+function beadInterval(norm) {
+  return Math.max(0.12, 0.24 - norm * 0.1);
+}
+
+function buildFinalNote(cur, dur = NOTE_BEAD_DUR) {
+  return {
+    midi: cur.lastMidi ?? cur.midi,
+    norm: cur.peakNorm,
+    dur,
+    dyn: dynamicFor(cur.peakNorm),
+    lyric: lyricFor(dur, cur.peakNorm),
+    expr: Math.random() < 0.18 ? EXPRESSIONS[Math.floor(Math.random() * EXPRESSIONS.length)] : null,
+    fermata: false,
+    accent: cur.peakNorm > 0.72,
+    live: false,
+    bead: true,
+  };
+}
 
 export default function App() {
   const [phase, setPhase] = useState("idle");
@@ -301,14 +322,18 @@ export default function App() {
       const cur = curNoteRef.current;
       if (cur && Math.abs((cur.lastMidi ?? midi) - midi) <= 3) {
         cur.dur = (now - cur.startMs) / 1000;
-        cur.peakMidi = norm > cur.peakNorm ? midi : cur.peakMidi;
-        if (norm > cur.peakNorm) cur.peakNorm = norm;
-        if (Math.abs(midi - cur.midi) >= 3) { cur.gliss = true; cur.glissTo = midi; }
+        if (norm > cur.peakNorm) { cur.peakNorm = norm; cur.peakMidi = midi; }
         cur.lastMidi = midi;
-        commitCurrent(false);
+        if (cur.dur >= beadInterval(cur.peakNorm)) {
+          appendBead(cur);
+          curNoteRef.current = { midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm, startMs: now, dur: 0, gliss: false, glissTo: null };
+          commitCurrent(true);
+        } else {
+          commitCurrent(false);
+        }
       } else {
         finalizeCurrent();
-        curNoteRef.current = { midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm, startMs: now, dur: 0.08, gliss: false, glissTo: null };
+        curNoteRef.current = { midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm, startMs: now, dur: 0, gliss: false, glissTo: null };
         commitCurrent(true);
       }
     } else {
@@ -322,16 +347,17 @@ export default function App() {
       else notesRef.current = [...arr.slice(0, -1), draft];
       setNotes(notesRef.current);
     }
+    function appendBead(cur) {
+      const fin = buildFinalNote(cur);
+      const arr = notesRef.current;
+      if (arr.length && arr[arr.length - 1].live) notesRef.current = [...arr.slice(0, -1), fin];
+      else notesRef.current = [...arr, fin];
+      setNotes(notesRef.current);
+    }
     function finalizeCurrent() {
       const cur = curNoteRef.current; if (!cur) return;
-      const dur = Math.max(0.12, cur.dur);
-      const fin = {
-        midi: cur.peakMidi ?? cur.midi, norm: cur.peakNorm, dur,
-        gliss: cur.gliss, glissTo: cur.glissTo, dyn: dynamicFor(cur.peakNorm),
-        lyric: lyricFor(dur, cur.peakNorm),
-        expr: Math.random() < 0.5 ? EXPRESSIONS[Math.floor(Math.random() * EXPRESSIONS.length)] : null,
-        fermata: dur > 1.2, accent: cur.peakNorm > 0.7 && dur < 0.6, live: false,
-      };
+      if (cur.dur < 0.04) { curNoteRef.current = null; return; }
+      const fin = buildFinalNote(cur);
       const arr = notesRef.current;
       if (arr.length && arr[arr.length - 1].live) notesRef.current = [...arr.slice(0, -1), fin];
       else notesRef.current = [...arr, fin];
@@ -362,8 +388,7 @@ export default function App() {
   const stop = useCallback(() => {
     const cur = curNoteRef.current;
     if (cur) {
-      const dur = Math.max(0.12, cur.dur);
-      const fin = { midi: cur.peakMidi ?? cur.midi, norm: cur.peakNorm, dur, gliss: cur.gliss, glissTo: cur.glissTo, dyn: dynamicFor(cur.peakNorm), lyric: lyricFor(dur, cur.peakNorm), expr: EXPRESSIONS[Math.floor(Math.random()*EXPRESSIONS.length)], fermata: dur > 1.2, accent: cur.peakNorm > 0.7 && dur < 0.6, live: false };
+      const fin = buildFinalNote(cur);
       const arr = notesRef.current;
       if (arr.length && arr[arr.length - 1].live) notesRef.current = [...arr.slice(0, -1), fin];
       else notesRef.current = [...arr, fin];
@@ -447,9 +472,9 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffL
   const blockH = staffH + 72;
   const layout = []; let x = padX + 64, line = 0; const lineMaxX = W - padX - 14;
   notes.forEach((n, i) => {
-    const w = n.rest ? 22 : 18 + Math.min(90, (n.dur || 0.4) * (n.live ? 62 : 52));
+    const w = n.rest ? 22 : NOTE_LAYOUT_W;
     if (x + w > lineMaxX) { line++; x = padX + 64; }
-    layout.push({ n, i, x, w, line }); x += w + (n.live ? 6 : 10);
+    layout.push({ n, i, x, w, line }); x += w + 7;
   });
   const noteLines = layout.length ? layout[layout.length - 1].line + 1 : 0;
   const totalLines = Math.max(minStaffLines, noteLines, 1);
@@ -494,40 +519,21 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffL
     }
 
     const y = staffY(n.midi, top, staffH);
-    const isLong = (n.dur || 0.4) >= 0.7;
-    const headRx = 5.6, headRy = 4.0;
+    const headRx = 5.2, headRy = 3.8;
 
-    // 나타냄말 (음표 위)
     if (n.expr) els.push(<text key={`ex${i}`} x={x} y={top - 8} fontSize="9.5" fontStyle="italic" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>{n.expr}</text>);
-    // 늘임표(페르마타)
     if (n.fermata) {
       els.push(<path key={`fmA${i}`} d={`M ${x-7} ${top - 16} A 7 7 0 0 1 ${x+7} ${top-16}`} fill="none" stroke={col} strokeWidth="1" />);
       els.push(<circle key={`fmD${i}`} cx={x} cy={top - 17} r="1.3" fill={col} />);
     }
-    // 악센트(>)
     if (n.accent) els.push(<text key={`ac${i}`} x={x} y={top - 16} fontSize="13" fill={col} textAnchor="middle" style={{fontFamily:SERIF}}>&gt;</text>);
 
-    // 음표 머리 (긴 음=빈 머리, 짧은 음=채운 머리)
-    els.push(<ellipse key={`h${i}`} cx={x} cy={y} rx={headRx} ry={headRy} transform={`rotate(-15 ${x} ${y})`} fill={isLong ? "#fff" : col} stroke={col} strokeWidth={isLong ? 1.5 : 0} />);
-    // 기둥
-    els.push(<line key={`st${i}`} x1={x + headRx - 0.4} y1={y} x2={x + headRx - 0.4} y2={y - 26} stroke={col} strokeWidth="1.2" />);
-    // 늘임선(긴 음): 가로로 길게 끄는 선 + 타이
-    if (isLong) {
-      els.push(<line key={`ext${i}`} x1={x + headRx + 2} y1={y} x2={x + w - 2} y2={y} stroke={col} strokeWidth="1" />);
-      els.push(<path key={`tie${i}`} d={`M ${x+4} ${y+5} Q ${x + w/2} ${y+13} ${x + w - 4} ${y+5}`} fill="none" stroke={col} strokeWidth="0.9" opacity="0.6" />);
+    els.push(<ellipse key={`h${i}`} cx={x} cy={y} rx={headRx} ry={headRy} transform={`rotate(-15 ${x} ${y})`} fill={col} />);
+    els.push(<line key={`st${i}`} x1={x + headRx - 0.4} y1={y} x2={x + headRx - 0.4} y2={y - 22} stroke={col} strokeWidth="1.2" />);
+    if (n.lyric) els.push(<text key={`ly${i}`} x={x} y={top + staffH + 20} fontSize="9" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>{n.lyric}</text>);
+    if (!n.live && i % 4 === 0) {
+      els.push(<text key={`dy${i}`} x={x} y={top + staffH + 36} fontSize="14" fontStyle="italic" fontWeight="700" fill={col} textAnchor="middle" style={{fontFamily:SERIF}}>{n.dyn}</text>);
     }
-    // gliss 점선 + 글자
-    if (n.gliss && n.glissTo != null) {
-      const y2 = staffY(n.glissTo, top, staffH);
-      els.push(<line key={`gl${i}`} x1={x + headRx + 2} y1={y - 1} x2={x + w - 2} y2={y2 - 1} stroke={col} strokeWidth="0.8" strokeDasharray="1.5 2.5" />);
-      els.push(<text key={`glt${i}`} x={x + w*0.55} y={Math.min(y,y2) - 6} fontSize="8" fontStyle="italic" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>gliss.</text>);
-    }
-    // 가사 (오선 아래)
-    els.push(<text key={`ly${i}`} x={x} y={top + staffH + 22} fontSize="10" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>{n.lyric}{isLong ? "" : ""}</text>);
-    if (isLong) els.push(<line key={`lyu${i}`} x1={x + 10} y1={top + staffH + 24} x2={x + w} y2={top + staffH + 24} stroke="#111" strokeWidth="0.6" />);
-    // 셈여림 (큼지막 이탤릭) + 영어 설명
-    els.push(<text key={`dy${i}`} x={x} y={top + staffH + 48} fontSize="20" fontStyle="italic" fontWeight="700" fill={col} textAnchor="middle" style={{fontFamily:SERIF}}>{n.dyn}</text>);
-    els.push(<text key={`dyn${i}`} x={x} y={top + staffH + 64} fontSize="8.5" fontStyle="italic" fill="#444" textAnchor="middle" style={{fontFamily:SERIF}}>{DYN_NOTES[n.dyn] || ""}</text>);
   });
 
   return (
@@ -544,9 +550,9 @@ function drawScoreSheet({ notes, meta, onBlob }) {
   const gap = 9, staffH = gap * 4, blockH = staffH + 120;
   const layout = []; let x = padX + 70, line = 0; const lineMaxX = W - padX - 20;
   notes.forEach((n, i) => {
-    const w = n.rest ? 30 : 30 + Math.min(110, (n.dur || 0.4) * 64);
+    const w = n.rest ? 30 : NOTE_LAYOUT_W + 8;
     if (x + w > lineMaxX) { line++; x = padX + 70; }
-    layout.push({ n, i, x, w, line }); x += w + 12;
+    layout.push({ n, i, x, w, line }); x += w + 8;
   });
   const totalLines = Math.max(1, (layout.length ? layout[layout.length - 1].line + 1 : 1));
   const titleH = 230;
@@ -601,8 +607,7 @@ function drawScoreSheet({ notes, meta, onBlob }) {
       return;
     }
     const y = staffYC(n.midi, top, staffH);
-    const isLong = (n.dur || 0.4) >= 0.7;
-    const headRx = 7.2, headRy = 5.2;
+    const headRx = 6.5, headRy = 4.6;
     if (n.expr) { ctx.fillStyle = "#111"; ctx.font = `italic 12px ${SERIF}`; ctx.textAlign = "center"; ctx.fillText(n.expr, x, top - 10); }
     if (n.fermata) {
       ctx.strokeStyle = "#111"; ctx.lineWidth = 1.2;
@@ -610,30 +615,16 @@ function drawScoreSheet({ notes, meta, onBlob }) {
       ctx.beginPath(); ctx.arc(x, top - 20, 1.7, 0, Math.PI*2); ctx.fillStyle = "#111"; ctx.fill();
     }
     if (n.accent) { ctx.fillStyle = "#111"; ctx.font = `16px ${SERIF}`; ctx.textAlign = "center"; ctx.fillText(">", x, top - 18); }
-    // 머리
     ctx.save(); ctx.translate(x, y); ctx.rotate(-15 * Math.PI/180);
     ctx.beginPath(); ctx.ellipse(0, 0, headRx, headRy, 0, 0, Math.PI*2);
-    if (isLong) { ctx.fillStyle = "#fff"; ctx.fill(); ctx.strokeStyle = "#111"; ctx.lineWidth = 1.8; ctx.stroke(); }
-    else { ctx.fillStyle = "#111"; ctx.fill(); }
+    ctx.fillStyle = "#111"; ctx.fill();
     ctx.restore();
     ctx.strokeStyle = "#111"; ctx.lineWidth = 1.4;
-    ctx.beginPath(); ctx.moveTo(x + headRx, y); ctx.lineTo(x + headRx, y - 32); ctx.stroke();
-    if (isLong) {
-      ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(x + headRx + 2, y); ctx.lineTo(x + w - 2, y); ctx.stroke();
-      ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x + 5, y + 6); ctx.quadraticCurveTo(x + w/2, y + 16, x + w - 5, y + 6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + headRx, y); ctx.lineTo(x + headRx, y - 26); ctx.stroke();
+    if (n.lyric) {
+      ctx.fillStyle = "#111"; ctx.font = `11px ${SERIF}`; ctx.textAlign = "center";
+      ctx.fillText(n.lyric, x, top + staffH + 24);
     }
-    if (n.gliss && n.glissTo != null) {
-      const y2 = staffYC(n.glissTo, top, staffH);
-      ctx.strokeStyle = "#111"; ctx.lineWidth = 1; ctx.setLineDash([2,3]);
-      ctx.beginPath(); ctx.moveTo(x + headRx + 2, y - 1); ctx.lineTo(x + w - 2, y2 - 1); ctx.stroke(); ctx.setLineDash([]);
-      ctx.font = `italic 11px ${SERIF}`; ctx.textAlign = "center"; ctx.fillStyle = "#111";
-      ctx.fillText("gliss.", x + w*0.55, Math.min(y,y2) - 8);
-    }
-    ctx.fillStyle = "#111"; ctx.font = `13px ${SERIF}`; ctx.textAlign = "center";
-    ctx.fillText(n.lyric, x, top + staffH + 28);
-    if (isLong) { ctx.strokeStyle = "#111"; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.moveTo(x + 14, top + staffH + 31); ctx.lineTo(x + w, top + staffH + 31); ctx.stroke(); }
-    ctx.font = `italic bold 26px ${SERIF}`; ctx.fillText(n.dyn, x, top + staffH + 62);
-    ctx.font = `italic 11px ${SERIF}`; ctx.fillStyle = "#444"; ctx.fillText(DYN_NOTES[n.dyn] || "", x, top + staffH + 80);
   });
 
   // 푸터
