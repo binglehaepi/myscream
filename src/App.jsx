@@ -21,6 +21,86 @@ const TEMPI = ["Molto drammatico", "Disperato", "Con tutta forza", "Largo doloro
 const FOOTERS = ["for one scream and breath", "to be performed only once", "in a single exhalation", "as loud as the body permits"];
 
 const UNIFIED_LYRIC = "a a a a - a";
+const PRESETS = {
+  soft: {
+    label: "Soft",
+    analysis: {
+      pitchConfidenceMin: 0.45,
+      voicingNormMin: 0.1,
+      eventCents: 58,
+      energyDelta: 0.26,
+      silenceFinalizeMs: 145,
+      maxBeadSpan: 0.46,
+    },
+    notation: {
+      restMs: 180,
+      breathMs: 420,
+      glissMinCents: 44,
+      vibratoMinCents: 24,
+    },
+    playback: {
+      legatoThreshold: 0.52,
+      noiseAmount: 0.012,
+      drive: 1.3,
+      vibratoDepthScale: 0.14,
+      masterGain: 0.85,
+      accentBoost: 0.12,
+      fermataHold: 1.25,
+    },
+  },
+  standard: {
+    label: "Standard",
+    analysis: {
+      pitchConfidenceMin: 0.33,
+      voicingNormMin: 0.082,
+      eventCents: 42,
+      energyDelta: 0.19,
+      silenceFinalizeMs: 110,
+      maxBeadSpan: 0.36,
+    },
+    notation: {
+      restMs: 130,
+      breathMs: 320,
+      glissMinCents: 28,
+      vibratoMinCents: 16,
+    },
+    playback: {
+      legatoThreshold: 0.42,
+      noiseAmount: 0.02,
+      drive: 1.75,
+      vibratoDepthScale: 0.2,
+      masterGain: 1,
+      accentBoost: 0.2,
+      fermataHold: 1.45,
+    },
+  },
+  extreme: {
+    label: "Extreme",
+    analysis: {
+      pitchConfidenceMin: 0.24,
+      voicingNormMin: 0.06,
+      eventCents: 28,
+      energyDelta: 0.12,
+      silenceFinalizeMs: 85,
+      maxBeadSpan: 0.28,
+    },
+    notation: {
+      restMs: 90,
+      breathMs: 220,
+      glissMinCents: 18,
+      vibratoMinCents: 10,
+    },
+    playback: {
+      legatoThreshold: 0.33,
+      noiseAmount: 0.034,
+      drive: 2.2,
+      vibratoDepthScale: 0.3,
+      masterGain: 0.88,
+      accentBoost: 0.32,
+      fermataHold: 1.8,
+    },
+  },
+};
 
 function lyricFor() {
   return UNIFIED_LYRIC;
@@ -57,10 +137,11 @@ function dynamicFor(norm) {
 }
 
 // ── 재생 엔진 (녹음 시각·박자·피치 반영) ──
-function playbackToneDur(n, gapToNext) {
+function playbackToneDur(n, gapToNext, preset) {
   const span = n.span || n.dur || NOTE_BEAD_DUR;
+  const fermataMul = n.fermata ? preset.playback.fermataHold : 1;
   if (gapToNext != null) return Math.max(0.08, gapToNext * 0.98 + 0.03);
-  return Math.max(0.1, span * 1.25);
+  return Math.max(0.1, span * 1.25 * fermataMul);
 }
 
 class ScorePlayer {
@@ -111,10 +192,10 @@ class ScorePlayer {
     }
     return end;
   }
-  playNote(freq, start, dur, norm, voice, glide, detune = 0, legato = true, vibDepth = 0) {
+  playNote(freq, start, dur, norm, voice, glide, detune = 0, legato = true, vibDepth = 0, accentBoost = 0, preset = PRESETS.standard) {
     const ctx = this.ctx;
     const t = start;
-    const vol = Math.min(0.95, 0.2 + norm * 0.65);
+    const vol = Math.min(0.95, (0.2 + norm * 0.65) * (1 + accentBoost));
     const end = t + dur + 0.08;
     const sustained = dur >= 0.4;
     const glideRatio = glide || 1;
@@ -165,7 +246,7 @@ class ScorePlayer {
       const curve = new Float32Array(256);
       for (let i = 0; i < 256; i++) {
         const x = (i / 128) - 1;
-        curve[i] = Math.tanh(x * (1.6 + norm * 1.7));
+        curve[i] = Math.tanh(x * (preset.playback.drive + norm * 1.7));
       }
       shaper.curve = curve;
       shaper.oversample = "2x";
@@ -188,7 +269,7 @@ class ScorePlayer {
       noiseF.type = "highpass";
       noiseF.frequency.value = 1500;
       const noiseG = ctx.createGain();
-      noiseG.gain.setValueAtTime(0.01 + norm * 0.02, t);
+      noiseG.gain.setValueAtTime(0.004 + norm * preset.playback.noiseAmount, t);
       noiseG.gain.exponentialRampToValueAtTime(0.001, t + dur + 0.04);
       const g = ctx.createGain();
       g.connect(this.master);
@@ -225,10 +306,11 @@ class ScorePlayer {
       this.track(g, end);
     }
   }
-  play(notes, voice, onStep, onEnd) {
+  play(notes, voice, preset, onStep, onEnd) {
     this.ensureCtx();
     this.stop();
     this.playing = true;
+    this.master.gain.setValueAtTime(clamp(preset.playback.masterGain, 0.35, 1), this.ctx.currentTime);
     const ctx = this.ctx;
     const base = ctx.currentTime + 0.06;
     const playable = [];
@@ -250,8 +332,8 @@ class ScorePlayer {
       const nextT = next ? (next.n.at != null ? next.n.at : t0 + (n.span || NOTE_BEAD_DUR)) : null;
       const gapToNext = nextT != null ? Math.max(0.04, nextT - t0) : null;
       tFallback = nextT ?? t0 + (n.span || NOTE_BEAD_DUR);
-      const legato = gapToNext == null || gapToNext < 0.42;
-      const toneDur = playbackToneDur(n, gapToNext);
+      const legato = gapToNext == null || gapToNext < preset.playback.legatoThreshold;
+      const toneDur = playbackToneDur(n, gapToNext, preset);
       const start = base + t0;
       totalSec = Math.max(totalSec, t0 + toneDur);
       const baseFreq = n.freq ?? midiToFreq(n.pitchMidi ?? n.midi);
@@ -261,8 +343,9 @@ class ScorePlayer {
         if (Math.abs(ratio - 1) > 0.01) glide = ratio;
       }
       const detune = n.detune ?? 0;
-      const vibDepth = n.vibrato ? clamp(10 + (n.vibratoDepth || 0) * 0.2, 8, 34) : 0;
-      this.playNote(baseFreq, start, toneDur, n.norm ?? 0.5, voice, glide, detune, legato, vibDepth);
+      const vibDepth = n.vibrato ? clamp(8 + (n.vibratoDepth || 0) * preset.playback.vibratoDepthScale, 4, 48) : 0;
+      const accentBoost = n.accent ? preset.playback.accentBoost : 0;
+      this.playNote(baseFreq, start, toneDur, n.norm ?? 0.5, voice, glide, detune, legato, vibDepth, accentBoost, preset);
       lastFreq = baseFreq;
       this.timers.push(setTimeout(() => { if (this.playing) onStep && onStep(i); }, t0 * 1000 + 30));
     });
@@ -316,12 +399,7 @@ const CLUSTER_TIME_GAP = 0.26;
 const MIN_NOTE_GAP = 5;
 const MIN_CLUSTER_GAP = 32;
 const MAX_CLUSTER_GAP = 130;
-const SILENCE_FINALIZE_MS = 110;
-const REST_GAP_MS = 130;
-const BREATH_GAP_MS = 320;
-const EVENT_CENTS = 42;
-const EVENT_ENERGY_DELTA = 0.19;
-const MAX_BEAD_SPAN = 0.36;
+const MAX_EMIT_PER_SEC = 18;
 
 function layoutNoteWidth(n, wide = false) {
   if (n.rest) return clamp((n.span || NOTE_BEAD_DUR) * (wide ? 120 : 95), wide ? 20 : 12, wide ? 78 : 60);
@@ -369,14 +447,14 @@ function centsBetween(freq, midi) {
   return Math.max(-80, Math.min(80, Math.round(1200 * Math.log2(freq / midiToFreq(midi)))));
 }
 
-function buildFinalNote(cur, dur = NOTE_BEAD_DUR) {
+function buildFinalNote(cur, preset, dur = NOTE_BEAD_DUR) {
   const midi = cur.lastMidi ?? cur.midi;
   const span = Math.max(0.05, cur.dur || dur);
   const at = (cur.beadStartMs - cur.sessionStartMs) / 1000;
   const energy = clamp(cur.peakNorm * 0.75 + (cur.brightness || 0) * 0.25, 0, 1);
   const vibratoDepth = cur.pitchVarCents || 0;
   let expr = null;
-  if (vibratoDepth > 28) expr = "molto vibrato";
+  if (vibratoDepth > preset.notation.vibratoMinCents * 1.6) expr = "molto vibrato";
   else if (cur.gliss) expr = "con dolore";
   else if (cur.energySlope > 0.12) expr = "con forza";
   else if (cur.energySlope < -0.11) expr = "poco meno intenso";
@@ -393,11 +471,11 @@ function buildFinalNote(cur, dur = NOTE_BEAD_DUR) {
     dyn: dynamicFor(energy),
     lyric: lyricFor(),
     expr,
-    fermata: span > 0.55 && cur.energySlope < -0.1,
+    fermata: span > 0.55 && cur.energySlope < -0.08,
     accent: cur.energySlope > 0.14 || energy > 0.78,
     gliss: !!cur.gliss,
     glissTo: cur.glissToFreq || null,
-    vibrato: vibratoDepth > 16,
+    vibrato: vibratoDepth > preset.notation.vibratoMinCents,
     vibratoDepth,
     live: false,
     bead: true,
@@ -412,6 +490,7 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [diag, setDiag] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [presetKey, setPresetKey] = useState("standard");
   const [voice, setVoice] = useState("ahh");
   const [playing, setPlaying] = useState(false);
   const [playIdx, setPlayIdx] = useState(-1);
@@ -432,6 +511,9 @@ export default function App() {
   const pitchHistRef = useRef([]);
   const energyHistRef = useRef([]);
   const prevNormRef = useRef(0);
+  const lastEmitAtRef = useRef(-1);
+
+  const preset = PRESETS[presetKey] || PRESETS.standard;
 
   const inIframe = (() => { try { return window.self !== window.top; } catch (e) { return true; } })();
   const isSecure = typeof window !== "undefined" && window.isSecureContext;
@@ -460,7 +542,7 @@ export default function App() {
     if (p) { freq = p.freq; conf = p.confidence; }
     let midi = null;
     let midiFloat = null;
-    if (freq != null && norm > 0.07 && conf > 0.3) {
+    if (freq != null && norm > preset.analysis.voicingNormMin && conf > preset.analysis.pitchConfidenceMin * 0.9) {
       pitchHistRef.current.push(freq);
       if (pitchHistRef.current.length > 5) pitchHistRef.current.shift();
       const fMed = median(pitchHistRef.current);
@@ -477,7 +559,7 @@ export default function App() {
     const liveFreq = freq != null ? freq : null;
     const now = performance.now();
     setElapsed((now - startRef.current) / 1000);
-    const VOICING = norm > 0.08 && midi != null && conf > 0.32;
+    const VOICING = norm > preset.analysis.voicingNormMin && midi != null && conf > preset.analysis.pitchConfidenceMin;
     if (VOICING) {
       lastVoiceTimeRef.current = now;
       const cur = curNoteRef.current;
@@ -494,12 +576,12 @@ export default function App() {
         const dNorm = norm - prevNormRef.current;
         cur.energySlope = cur.energySlope * 0.72 + dNorm * 0.28;
         cur.brightness = cur.brightness * 0.78 + clamp(norm * conf, 0, 1) * 0.22;
-        cur.gliss = dCents > 28;
+        cur.gliss = dCents > preset.notation.glissMinCents;
         if (cur.gliss && cur.startFreq != null && cur.endFreq != null) cur.glissToFreq = cur.endFreq;
-        const segByContour = dCents >= EVENT_CENTS || dNorm >= EVENT_ENERGY_DELTA;
-        const segByTime = cur.dur >= MAX_BEAD_SPAN;
+        const segByContour = dCents >= preset.analysis.eventCents || dNorm >= preset.analysis.energyDelta;
+        const segByTime = cur.dur >= preset.analysis.maxBeadSpan;
         if (segByContour || segByTime) {
-          appendBead(cur);
+          appendBead(cur, now);
           curNoteRef.current = {
             midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm,
             startMs: now, beadStartMs: now, sessionStartMs: startRef.current,
@@ -526,7 +608,7 @@ export default function App() {
         commitCurrent(true);
       }
     } else {
-      if (now - lastVoiceTimeRef.current > SILENCE_FINALIZE_MS) finalizeCurrent(now);
+      if (now - lastVoiceTimeRef.current > preset.analysis.silenceFinalizeMs) finalizeCurrent(now);
     }
     prevNormRef.current = norm;
     rafRef.current = requestAnimationFrame(tick);
@@ -545,23 +627,26 @@ export default function App() {
       else notesRef.current = [...arr.slice(0, -1), draft];
       setNotes(notesRef.current);
     }
-    function appendBead(cur) {
-      const fin = buildFinalNote(cur);
+    function appendBead(cur, nowMs) {
+      if (lastEmitAtRef.current >= 0 && nowMs - lastEmitAtRef.current < 1000 / MAX_EMIT_PER_SEC) return;
+      const fin = buildFinalNote(cur, preset);
       const arr = notesRef.current;
       if (arr.length && arr[arr.length - 1].live) notesRef.current = [...arr.slice(0, -1), fin];
       else notesRef.current = [...arr, fin];
       setNotes(notesRef.current);
+      lastEmitAtRef.current = nowMs;
     }
     function finalizeCurrent(nowMs) {
       const cur = curNoteRef.current; if (!cur) return;
       if (cur.dur < 0.04) { curNoteRef.current = null; return; }
-      const fin = buildFinalNote(cur);
+      const fin = buildFinalNote(cur, preset);
       const arr = notesRef.current;
       if (arr.length && arr[arr.length - 1].live) notesRef.current = [...arr.slice(0, -1), fin];
       else notesRef.current = [...arr, fin];
       setNotes(notesRef.current);
       curNoteRef.current = null;
       lastVoiceTimeRef.current = nowMs || lastVoiceTimeRef.current;
+      lastEmitAtRef.current = nowMs || lastEmitAtRef.current;
     }
     function insertRestIfNeeded(nowMs) {
       const arr = notesRef.current;
@@ -569,10 +654,10 @@ export default function App() {
       if (!last || last.live || last.rest || last.at == null || last.span == null) return;
       const endAt = last.at + last.span;
       const gapSec = Math.max(0, (nowMs - startRef.current) / 1000 - endAt);
-      if (gapSec < REST_GAP_MS / 1000) return;
+      if (gapSec < preset.notation.restMs / 1000) return;
       notesRef.current = [...arr, {
         rest: true,
-        breath: gapSec >= BREATH_GAP_MS / 1000,
+        breath: gapSec >= preset.notation.breathMs / 1000,
         at: endAt,
         span: gapSec,
         dur: Math.min(0.6, gapSec),
@@ -580,7 +665,7 @@ export default function App() {
       }];
       setNotes(notesRef.current);
     }
-  }, []);
+  }, [preset]);
 
   const start = useCallback(async () => {
     if (!hasMic) { setDiag({ errName: "NoMediaDevices" }); setPhase("denied"); return; }
@@ -597,6 +682,7 @@ export default function App() {
       startRef.current = performance.now();
       notesRef.current = []; curNoteRef.current = null; lastMidiRef.current = null; lastVoiceTimeRef.current = 0;
       pitchHistRef.current = []; energyHistRef.current = []; prevNormRef.current = 0;
+      lastEmitAtRef.current = -1;
       setNotes([]); setElapsed(0); setPhase("recording");
       rafRef.current = requestAnimationFrame(tick);
     } catch (e) { setDiag({ errName: e && e.name ? e.name : "UnknownError" }); setPhase("denied"); }
@@ -605,7 +691,7 @@ export default function App() {
   const stop = useCallback(() => {
     const cur = curNoteRef.current;
     if (cur) {
-      const fin = buildFinalNote(cur);
+      const fin = buildFinalNote(cur, preset);
       const arr = notesRef.current;
       if (arr.length && arr[arr.length - 1].live) notesRef.current = [...arr.slice(0, -1), fin];
       else notesRef.current = [...arr, fin];
@@ -626,7 +712,7 @@ export default function App() {
     setResult({ dur, count: notesRef.current.length, ts: new Date(), no: Math.floor(Math.random() * 9000) + 1000 });
     setPhase("done");
     cleanup();
-  }, [cleanup]);
+  }, [cleanup, preset]);
 
   const reset = useCallback(() => {
     if (playerRef.current) playerRef.current.stop();
@@ -651,8 +737,8 @@ export default function App() {
     const p = playerRef.current;
     if (playing) { p.stop(); setPlaying(false); setPlayIdx(-1); return; }
     setPlaying(true);
-    p.play(notesRef.current, voice, (i) => setPlayIdx(i), () => { setPlaying(false); setPlayIdx(-1); });
-  }, [playing, voice]);
+    p.play(notesRef.current, voice, preset, (i) => setPlayIdx(i), () => { setPlaying(false); setPlayIdx(-1); });
+  }, [playing, voice, preset]);
 
   const changeVoice = useCallback((v) => {
     if (playerRef.current) playerRef.current.stop(); setPlaying(false); setPlayIdx(-1); setVoice(v);
@@ -671,8 +757,8 @@ export default function App() {
         {phase === "idle" && <IdleView onStart={start} inIframe={inIframe} />}
         {phase === "arming" && <div style={S.center}><p style={S.armText}>마이크 권한 허용해줘…</p></div>}
         {phase === "denied" && <DeniedView diag={diag} inIframe={inIframe} isSecure={isSecure} hasMic={hasMic} onReset={reset} />}
-        {phase === "recording" && <RecordView notes={notes} level={level} elapsed={elapsed} onStop={stop} />}
-        {phase === "done" && result && <DoneView notes={notes} meta={meta} r={result} onReset={reset} onSave={saveImage} onCopy={copyLink} saving={saving} voice={voice} onVoice={changeVoice} playing={playing} playIdx={playIdx} onTogglePlay={togglePlay} />}
+        {phase === "recording" && <RecordView notes={notes} level={level} elapsed={elapsed} onStop={stop} presetKey={presetKey} onPreset={setPresetKey} />}
+        {phase === "done" && result && <DoneView notes={notes} meta={meta} r={result} onReset={reset} onSave={saveImage} onCopy={copyLink} saving={saving} voice={voice} onVoice={changeVoice} playing={playing} playIdx={playIdx} onTogglePlay={togglePlay} presetKey={presetKey} onPreset={setPresetKey} />}
       </div>
     </div>
   );
@@ -701,7 +787,7 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffL
   layout.forEach(({ n, line }) => {
     if (n.rest || n.midi == null) return;
     const top = noteTop + headH + line * blockH + 8;
-    const y = staffY(n.midi, top, staffH);
+    const y = staffY(n.pitchMidi ?? n.midi, top, staffH);
     extMinY = Math.min(extMinY, y - 30);
     extMaxY = Math.max(extMaxY, y + 14);
   });
@@ -769,7 +855,7 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffL
     els.push(<ellipse key={`h${i}`} cx={x} cy={y} rx={headRx} ry={headRy} transform={`rotate(-15 ${x} ${y})`} fill={col} />);
     els.push(<line key={`st${i}`} x1={x + headRx - 0.4} y1={y} x2={x + headRx - 0.4} y2={y - 22} stroke={col} strokeWidth="1.2" />);
     if (i === 0 && n.lyric) els.push(<text key={`ly${i}`} x={W / 2} y={top + staffH + 20} fontSize="10" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>{n.lyric}</text>);
-    if (!n.live && i % 4 === 0) {
+    if (!n.live) {
       els.push(<text key={`dy${i}`} x={x} y={top + staffH + 36} fontSize="14" fontStyle="italic" fontWeight="700" fill={col} textAnchor="middle" style={{fontFamily:SERIF}}>{n.dyn}</text>);
       els.push(<text key={`dynn${i}`} x={x} y={top + staffH + 46} fontSize="7.5" fill="#777" textAnchor="middle" style={{fontFamily:MONO}}>{DYN_NOTES[n.dyn] || ""}</text>);
     }
@@ -796,7 +882,7 @@ function drawScoreSheet({ notes, meta, onBlob }) {
   layout.forEach(({ n, line }) => {
     if (n.rest || n.midi == null) return;
     const top = scoreTop + line * blockH + 10;
-    const y = staffYC(n.midi, top, staffH);
+    const y = staffYC(n.pitchMidi ?? n.midi, top, staffH);
     extMinY = Math.min(extMinY, y - 34);
     extMaxY = Math.max(extMaxY, y + 16);
   });
@@ -887,7 +973,7 @@ function drawScoreSheet({ notes, meta, onBlob }) {
       ctx.fillStyle = "#111"; ctx.font = `11px ${SERIF}`; ctx.textAlign = "center";
       ctx.fillText(n.lyric, W / 2, top + staffH + 24);
     }
-    if (!n.live && i % 4 === 0) {
+    if (!n.live) {
       ctx.fillStyle = "#666"; ctx.font = `8px ${MONO}`; ctx.textAlign = "center";
       ctx.fillText(DYN_NOTES[n.dyn] || "", x, top + staffH + 43);
     }
@@ -920,10 +1006,23 @@ function IdleView({ onStart, inIframe }) {
   );
 }
 
-function RecordView({ notes, level, elapsed, onStop }) {
+function PresetSelector({ presetKey, onChange }) {
+  return (
+    <div style={S.presetRow}>
+      {Object.entries(PRESETS).map(([k, cfg]) => (
+        <button key={k} style={presetKey === k ? S.presetOn : S.presetOff} onClick={() => onChange(k)}>
+          {cfg.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function RecordView({ notes, level, elapsed, onStop, presetKey, onPreset }) {
   return (
     <div style={S.sheet}>
       <h1 style={S.brandTitleSmall}>aakbo</h1>
+      <PresetSelector presetKey={presetKey} onChange={onPreset} />
       <p style={S.recLabel}>● {elapsed.toFixed(1)}s</p>
       <div style={S.liveScore}>
         <ScoreSheet notes={notes} meta={{ tempo: "", bpm: 72 }} W={760} showHeader={false} minStaffLines={PREPARED_STAFF_LINES} />
@@ -934,12 +1033,13 @@ function RecordView({ notes, level, elapsed, onStop }) {
   );
 }
 
-function DoneView({ notes, meta, r, onReset, onSave, onCopy, saving, voice, onVoice, playing, playIdx, onTogglePlay }) {
+function DoneView({ notes, meta, r, onReset, onSave, onCopy, saving, voice, onVoice, playing, playIdx, onTogglePlay, presetKey, onPreset }) {
   return (
     <>
       <div style={S.sheet} className="pop">
         <h1 style={S.brandTitle}>aakbo</h1>
         <p style={S.lyricSub}>{UNIFIED_LYRIC}</p>
+        <PresetSelector presetKey={presetKey} onChange={onPreset} />
         <div style={S.doneScore}>
           <ScoreSheet notes={notes} meta={meta} W={760} playIdx={playIdx} showHeader minStaffLines={PREPARED_STAFF_LINES} />
         </div>
@@ -1010,6 +1110,9 @@ const S = {
   meterFill: { height: "100%", background: "#111", transition: "width 40ms linear" },
 
   playerBox: { marginTop: 16 },
+  presetRow: { display: "flex", gap: 6, marginBottom: 10 },
+  presetOn: { flex: 1, padding: "8px 4px", background: "#222", color: "#fff", border: "1.5px solid #111", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
+  presetOff: { flex: 1, padding: "8px 4px", background: "#fff", color: "#111", border: "1.5px solid #ccc", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
   voiceRow: { display: "flex", gap: 6, marginBottom: 10 },
   voiceOn: { flex: 1, padding: "10px 4px", background: "#111", color: "#fff", border: "1.5px solid #111", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
   voiceOff: { flex: 1, padding: "10px 4px", background: "#fff", color: "#111", border: "1.5px solid #ccc", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
