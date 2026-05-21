@@ -252,6 +252,47 @@ function staffY(midi, top, staffH) {
 const PREPARED_STAFF_LINES = 5;
 const NOTE_BEAD_DUR = 0.16;
 const NOTE_LAYOUT_W = 30;
+const LAYOUT_PX_PER_SEC = 88;
+const CLUSTER_TIME_GAP = 0.26;
+const MIN_NOTE_GAP = 5;
+const MIN_CLUSTER_GAP = 32;
+const MAX_CLUSTER_GAP = 130;
+
+function layoutNoteWidth(n, wide = false) {
+  if (n.rest) return wide ? 30 : 22;
+  return wide ? NOTE_LAYOUT_W + 8 : NOTE_LAYOUT_W;
+}
+
+/** 녹음 시각(at) 기준: 연속 구간은 몰리고, 쉼 뒤 재개는 넓은 간격 */
+function layoutScoreNotes(notes, W, opts = {}) {
+  const padX = opts.padX ?? 30;
+  const startX = opts.startX ?? padX + 64;
+  const lineMaxX = W - padX - (opts.linePad ?? 14);
+  const wide = !!opts.wide;
+  const layout = [];
+  let x = startX;
+  let line = 0;
+  notes.forEach((n, i) => {
+    const w = layoutNoteWidth(n, wide);
+    let gapBefore = 0;
+    let clusterBreak = false;
+    if (i > 0) {
+      const prev = notes[i - 1];
+      const dt = n.at != null && prev.at != null
+        ? Math.max(0, n.at - prev.at)
+        : (n.live ? NOTE_BEAD_DUR * 0.45 : NOTE_BEAD_DUR);
+      clusterBreak = dt >= CLUSTER_TIME_GAP;
+      gapBefore = clusterBreak
+        ? Math.min(MAX_CLUSTER_GAP, Math.max(MIN_CLUSTER_GAP, dt * LAYOUT_PX_PER_SEC))
+        : Math.max(MIN_NOTE_GAP, dt * LAYOUT_PX_PER_SEC * 0.42);
+      x += gapBefore;
+    }
+    if (x + w > lineMaxX) { line++; x = startX; clusterBreak = false; gapBefore = 0; }
+    layout.push({ n, i, x, w, line, gapBefore, clusterBreak });
+    x += w;
+  });
+  return layout;
+}
 
 function beadInterval(norm) {
   return Math.max(0.12, 0.24 - norm * 0.1);
@@ -376,7 +417,15 @@ export default function App() {
     rafRef.current = requestAnimationFrame(tick);
 
     function commitCurrent(isNew) {
-      const arr = notesRef.current; const draft = { ...curNoteRef.current, live: true };
+      const cur = curNoteRef.current;
+      const draft = {
+        ...cur,
+        live: true,
+        at: cur.beadStartMs != null && cur.sessionStartMs != null
+          ? (cur.beadStartMs - cur.sessionStartMs) / 1000
+          : undefined,
+      };
+      const arr = notesRef.current;
       if (isNew || arr.length === 0 || !arr[arr.length - 1].live) notesRef.current = [...arr, draft];
       else notesRef.current = [...arr.slice(0, -1), draft];
       setNotes(notesRef.current);
@@ -504,12 +553,7 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffL
   const padX = 30, gap = 7.5, staffH = gap * 4;
   const noteTop = showHeader ? 56 : 20;
   const blockH = staffH + 72;
-  const layout = []; let x = padX + 64, line = 0; const lineMaxX = W - padX - 14;
-  notes.forEach((n, i) => {
-    const w = n.rest ? 22 : NOTE_LAYOUT_W;
-    if (x + w > lineMaxX) { line++; x = padX + 64; }
-    layout.push({ n, i, x, w, line }); x += w + 7;
-  });
+  const layout = layoutScoreNotes(notes, W, { padX, startX: padX + 64, linePad: 14 });
   const noteLines = layout.length ? layout[layout.length - 1].line + 1 : 0;
   const totalLines = Math.max(minStaffLines, noteLines, 1);
   const headH = showHeader ? 30 : 4;
@@ -552,10 +596,16 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffL
     }
   }
 
-  layout.forEach(({ n, i, x, w, line }) => {
+  layout.forEach(({ n, i, x, w, line, gapBefore, clusterBreak }) => {
     const top = noteTop + headH + line * blockH + 8;
     const isPlay = i === playIdx;
     const col = isPlay || n.live ? "#c0143c" : "#111";
+
+    if (clusterBreak && gapBefore > MIN_CLUSTER_GAP * 0.8) {
+      const gx = x - gapBefore * 0.5;
+      els.push(<line key={`cgap${i}`} x1={gx - 6} y1={top + gap * 2} x2={gx + 6} y2={top + gap * 2} stroke="#bbb" strokeWidth="0.6" strokeDasharray="2 3" />);
+      els.push(<text key={`cgapT${i}`} x={gx} y={top + gap * 2 - 5} fontSize="7" fill="#999" textAnchor="middle" style={{ fontFamily: MONO }}>· · ·</text>);
+    }
 
     if (n.rest) {
       // 온쉼표(넷째 줄 위 막대) 또는 breath
@@ -594,12 +644,7 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffL
 function drawScoreSheet({ notes, meta, onBlob }) {
   const W = 1000, dpr = 2, padX = 70;
   const gap = 9, staffH = gap * 4, blockH = staffH + 120;
-  const layout = []; let x = padX + 70, line = 0; const lineMaxX = W - padX - 20;
-  notes.forEach((n, i) => {
-    const w = n.rest ? 30 : NOTE_LAYOUT_W + 8;
-    if (x + w > lineMaxX) { line++; x = padX + 70; }
-    layout.push({ n, i, x, w, line }); x += w + 8;
-  });
+  const layout = layoutScoreNotes(notes, W, { padX, startX: padX + 70, linePad: 20, wide: true });
   const totalLines = Math.max(1, (layout.length ? layout[layout.length - 1].line + 1 : 1));
   const titleH = 230;
   const scoreTop = titleH;
@@ -659,8 +704,16 @@ function drawScoreSheet({ notes, meta, onBlob }) {
     }
   }
 
-  layout.forEach(({ n, i, x, w, line }) => {
+  layout.forEach(({ n, i, x, w, line, gapBefore, clusterBreak }) => {
     const top = scoreTop + line * blockH + 10;
+    if (clusterBreak && gapBefore > MIN_CLUSTER_GAP * 0.8) {
+      const gx = x - gapBefore * 0.5;
+      ctx.strokeStyle = "#bbb"; ctx.lineWidth = 0.7; ctx.setLineDash([3, 4]);
+      ctx.beginPath(); ctx.moveTo(gx - 8, top + gap * 2); ctx.lineTo(gx + 8, top + gap * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#999"; ctx.font = `8px ${MONO}`; ctx.textAlign = "center";
+      ctx.fillText("· · ·", gx, top + gap * 2 - 4);
+    }
     if (n.rest) {
       ctx.fillStyle = "#111"; ctx.fillRect(x - 7, top + gap - 3, 14, 4);
       if (n.breath) { ctx.font = `italic 13px ${SERIF}`; ctx.textAlign = "center"; ctx.fillText("(breath)", x, top - 8); }
