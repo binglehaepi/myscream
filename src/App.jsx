@@ -170,7 +170,7 @@ function playbackToneDur(n, gapToNext, preset) {
 }
 
 class ScorePlayer {
-  constructor() { this.ctx = null; this.master = null; this.recordDest = null; this.timers = []; this.nodes = []; this.playing = false; this.recentTones = []; this.activeVoices = 0; }
+  constructor() { this.ctx = null; this.master = null; this.recordDest = null; this.timers = []; this.nodes = []; this.playing = false; this.recentTones = []; }
   ensureCtx() {
     if (!this.ctx || this.ctx.state === "closed") {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -195,7 +195,6 @@ class ScorePlayer {
     });
     this.nodes = [];
     this.recentTones = [];
-    this.activeVoices = 0;
     this.playing = false;
   }
   track(node, end) { this.nodes.push({ node, end }); return node; }
@@ -235,10 +234,6 @@ class ScorePlayer {
     const sustained = dur >= 0.4;
     const glideRatio = glide || 1;
     const glideT = legato ? Math.min(dur * 0.85, Math.max(0.06, dur * 0.5)) : Math.min(dur * 0.7, 0.12);
-    const releaseAt = end + 0.08;
-    this.activeVoices += 1;
-    this.timers.push(setTimeout(() => { this.activeVoices = Math.max(0, this.activeVoices - 1); }, Math.max(0, (releaseAt - this.ctx.currentTime) * 1000)));
-
     if (voice === "piano") {
       const partials = [1, 2, 3, 4];
       const gains = sustained ? [1, 0.55, 0.32, 0.14] : [1, 0.45, 0.22, 0.1];
@@ -387,6 +382,8 @@ class ScorePlayer {
     let totalSec = 0;
     let tFallback = 0;
     const hardVoiceLimit = Math.max(2, preset.playback.maxActiveVoices || 5);
+    const comp = clamp(1 / Math.sqrt(Math.max(1, hardVoiceLimit * 0.85)), 0.35, 1);
+    this.master.gain.setValueAtTime(clamp(preset.playback.masterGain * comp, 0.25, 1), this.ctx.currentTime);
     playable.forEach(({ n, i }, pi) => {
       const t0Raw = n.at != null ? n.at : tFallback;
       const t0 = t0Raw * (preset.playback.timeStretch || 1);
@@ -408,24 +405,27 @@ class ScorePlayer {
       const detune = n.detune ?? 0;
       const vibDepth = n.vibrato ? clamp(8 + (n.vibratoDepth || 0) * preset.playback.vibratoDepthScale, 4, 48) : 0;
       const accentBoost = n.accent ? preset.playback.accentBoost : 0;
-      if (this.activeVoices < hardVoiceLimit) this.playNote(baseFreq, start, toneDur, n.norm ?? 0.5, voice, glide, detune, legato, vibDepth, accentBoost, preset);
+      this.playNote(baseFreq, start, toneDur, n.norm ?? 0.5, voice, glide, detune, legato, vibDepth, accentBoost, preset);
+      let voicesUsed = 1;
 
       const splitOn = (n.norm ?? 0) >= preset.playback.splitThresholdNorm || n.accent || (n.vibratoDepth || 0) > 20;
       if (splitOn) {
         const splitIntervals = preset.playback.splitIntervals || [];
         splitIntervals.forEach((semi, si) => {
-          if (this.activeVoices >= hardVoiceLimit) return;
+          if (voicesUsed >= hardVoiceLimit) return;
           const hf = baseFreq * Math.pow(2, semi / 12);
           const hn = (n.norm ?? 0.5) * preset.playback.splitMix * (si === 0 ? 1 : 0.85);
           this.playNote(hf, start, toneDur * 0.96, hn, voice, glide, detune + (si % 2 ? -3 : 3), legato, vibDepth * 0.8, 0, preset);
+          voicesUsed += 1;
         });
       }
 
       const trails = this.trailLayers(t0Raw, preset, preset.playback.trailVoices || 0);
       trails.forEach((tr, ti) => {
-        if (this.activeVoices >= hardVoiceLimit) return;
+        if (voicesUsed >= hardVoiceLimit) return;
         const td = Math.max(0.12, toneDur * (0.65 - ti * 0.08));
         this.playNote(tr.freq, start, td, tr.norm, voice, null, tr.detune, true, vibDepth * 0.45, 0, preset);
+        voicesUsed += 1;
       });
 
       this.addRecentTone({ at: t0Raw, freq: baseFreq, norm: n.norm ?? 0.5 });
