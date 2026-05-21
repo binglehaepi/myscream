@@ -40,12 +40,13 @@ const PRESETS = {
     },
     playback: {
       legatoThreshold: 0.52,
-      noiseAmount: 0.012,
-      drive: 1.3,
-      vibratoDepthScale: 0.14,
+      noiseAmount: 0.006,
+      drive: 1.05,
+      vibratoDepthScale: 0.09,
       masterGain: 0.85,
       accentBoost: 0.12,
       fermataHold: 1.25,
+      timeStretch: 1.24,
     },
   },
   standard: {
@@ -53,10 +54,10 @@ const PRESETS = {
     analysis: {
       pitchConfidenceMin: 0.33,
       voicingNormMin: 0.082,
-      eventCents: 42,
-      energyDelta: 0.19,
-      silenceFinalizeMs: 110,
-      maxBeadSpan: 0.36,
+      eventCents: 54,
+      energyDelta: 0.24,
+      silenceFinalizeMs: 145,
+      maxBeadSpan: 0.5,
     },
     notation: {
       restMs: 130,
@@ -65,13 +66,14 @@ const PRESETS = {
       vibratoMinCents: 16,
     },
     playback: {
-      legatoThreshold: 0.42,
-      noiseAmount: 0.02,
-      drive: 1.75,
-      vibratoDepthScale: 0.2,
-      masterGain: 1,
-      accentBoost: 0.2,
-      fermataHold: 1.45,
+      legatoThreshold: 0.55,
+      noiseAmount: 0.009,
+      drive: 1.2,
+      vibratoDepthScale: 0.12,
+      masterGain: 0.88,
+      accentBoost: 0.16,
+      fermataHold: 1.55,
+      timeStretch: 1.36,
     },
   },
   extreme: {
@@ -92,12 +94,13 @@ const PRESETS = {
     },
     playback: {
       legatoThreshold: 0.33,
-      noiseAmount: 0.034,
-      drive: 2.2,
-      vibratoDepthScale: 0.3,
+      noiseAmount: 0.018,
+      drive: 1.55,
+      vibratoDepthScale: 0.2,
       masterGain: 0.88,
       accentBoost: 0.32,
       fermataHold: 1.8,
+      timeStretch: 1.18,
     },
   },
 };
@@ -140,8 +143,9 @@ function dynamicFor(norm) {
 function playbackToneDur(n, gapToNext, preset) {
   const span = n.span || n.dur || NOTE_BEAD_DUR;
   const fermataMul = n.fermata ? preset.playback.fermataHold : 1;
-  if (gapToNext != null) return Math.max(0.08, gapToNext * 0.98 + 0.03);
-  return Math.max(0.1, span * 1.25 * fermataMul);
+  const stretch = preset.playback.timeStretch || 1;
+  if (gapToNext != null) return Math.max(0.12, (gapToNext * 1.08 + 0.07) * stretch);
+  return Math.max(0.14, span * 1.35 * fermataMul * stretch);
 }
 
 class ScorePlayer {
@@ -238,7 +242,7 @@ class ScorePlayer {
       this.track(g, end);
     } else {
       const src = ctx.createOscillator();
-      src.type = "sawtooth";
+      src.type = "triangle";
       src.frequency.setValueAtTime(freq, t);
       src.detune.setValueAtTime(detune, t);
       if (glide) src.frequency.exponentialRampToValueAtTime(freq * glideRatio, t + glideT);
@@ -252,11 +256,11 @@ class ScorePlayer {
       shaper.oversample = "2x";
       const f1 = ctx.createBiquadFilter();
       f1.type = "bandpass";
-      f1.frequency.value = 680 + norm * 520;
+      f1.frequency.value = 540 + norm * 360;
       f1.Q.value = sustained ? 5.3 : 7.5;
       const f2 = ctx.createBiquadFilter();
       f2.type = "bandpass";
-      f2.frequency.value = 1050 + norm * 700;
+      f2.frequency.value = 920 + norm * 480;
       f2.Q.value = sustained ? 5.8 : 9.5;
       const mix = ctx.createGain();
       mix.gain.value = 1.22;
@@ -267,7 +271,7 @@ class ScorePlayer {
       noise.buffer = noiseBuf;
       const noiseF = ctx.createBiquadFilter();
       noiseF.type = "highpass";
-      noiseF.frequency.value = 1500;
+      noiseF.frequency.value = 1850;
       const noiseG = ctx.createGain();
       noiseG.gain.setValueAtTime(0.004 + norm * preset.playback.noiseAmount, t);
       noiseG.gain.exponentialRampToValueAtTime(0.001, t + dur + 0.04);
@@ -284,13 +288,13 @@ class ScorePlayer {
       noiseF.connect(noiseG);
       noiseG.connect(g);
       const lfo = ctx.createOscillator();
-      lfo.frequency.value = sustained ? 4.3 : 5.8;
+      lfo.frequency.value = sustained ? 3.4 : 4.3;
       const lfoG = ctx.createGain();
       lfoG.gain.value = freq * (sustained ? 0.006 : 0.011);
       lfo.connect(lfoG);
       lfoG.connect(src.frequency);
       const vib = ctx.createOscillator();
-      vib.frequency.value = 6.2;
+      vib.frequency.value = 4.8;
       const vibG = ctx.createGain();
       vibG.gain.value = vibDepth;
       vib.connect(vibG);
@@ -312,7 +316,7 @@ class ScorePlayer {
     this.playing = true;
     this.master.gain.setValueAtTime(clamp(preset.playback.masterGain, 0.35, 1), this.ctx.currentTime);
     const ctx = this.ctx;
-    const base = ctx.currentTime + 0.06;
+    const base = ctx.currentTime + 0.08;
     const playable = [];
     notes.forEach((n, i) => {
       if (n.midi != null && !n.rest) playable.push({ n, i });
@@ -327,11 +331,13 @@ class ScorePlayer {
     let totalSec = 0;
     let tFallback = 0;
     playable.forEach(({ n, i }, pi) => {
-      const t0 = n.at != null ? n.at : tFallback;
+      const t0Raw = n.at != null ? n.at : tFallback;
+      const t0 = t0Raw * (preset.playback.timeStretch || 1);
       const next = playable[pi + 1];
-      const nextT = next ? (next.n.at != null ? next.n.at : t0 + (n.span || NOTE_BEAD_DUR)) : null;
+      const nextRaw = next ? (next.n.at != null ? next.n.at : t0Raw + (n.span || NOTE_BEAD_DUR)) : null;
+      const nextT = nextRaw != null ? nextRaw * (preset.playback.timeStretch || 1) : null;
       const gapToNext = nextT != null ? Math.max(0.04, nextT - t0) : null;
-      tFallback = nextT ?? t0 + (n.span || NOTE_BEAD_DUR);
+      tFallback = nextRaw ?? t0Raw + (n.span || NOTE_BEAD_DUR);
       const legato = gapToNext == null || gapToNext < preset.playback.legatoThreshold;
       const toneDur = playbackToneDur(n, gapToNext, preset);
       const start = base + t0;
