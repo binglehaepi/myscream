@@ -46,7 +46,7 @@ const PRESETS = {
       masterGain: 0.85,
       accentBoost: 0.12,
       fermataHold: 1.25,
-      timeStretch: 1,
+      playbackSpeed: 0.62,
     },
   },
   standard: {
@@ -73,7 +73,7 @@ const PRESETS = {
       masterGain: 0.88,
       accentBoost: 0.16,
       fermataHold: 1.55,
-      timeStretch: 1,
+      playbackSpeed: 0.58,
     },
   },
   extreme: {
@@ -100,7 +100,7 @@ const PRESETS = {
       masterGain: 0.88,
       accentBoost: 0.32,
       fermataHold: 1.8,
-      timeStretch: 1,
+      playbackSpeed: 0.55,
     },
   },
 };
@@ -140,11 +140,21 @@ function dynamicFor(norm) {
 }
 
 // ── 재생 엔진 (녹음 시각·박자·피치 반영) ──
+function playbackSpeedOf(preset) {
+  return clamp(preset.playback.playbackSpeed ?? 1, 0.35, 1);
+}
+
+function playbackAt(at, preset) {
+  if (at == null) return null;
+  return at / playbackSpeedOf(preset);
+}
+
 function playbackToneDur(n, gapToNext, preset) {
   const span = n.span || n.dur || NOTE_BEAD_DUR;
   const fermataMul = n.fermata ? preset.playback.fermataHold : 1;
-  if (gapToNext != null) return Math.max(0.08, gapToNext * 0.98 + 0.03);
-  return Math.max(0.1, span * 1.25 * fermataMul);
+  const minDur = 0.26;
+  if (gapToNext != null) return Math.max(minDur, gapToNext * 0.96 + 0.06);
+  return Math.max(minDur, span * 1.35 * fermataMul);
 }
 
 class ScorePlayer {
@@ -337,14 +347,15 @@ class ScorePlayer {
     let lastFreq = null;
     let totalSec = 0;
     let tFallback = 0;
+    const speed = playbackSpeedOf(preset);
     playable.forEach(({ n, i }, pi) => {
-      const t0Raw = n.at != null ? n.at : tFallback;
-      const t0 = t0Raw;
+      const t0Raw = n.at != null ? n.at : tFallback * speed;
+      const t0 = playbackAt(t0Raw, preset);
       const next = playable[pi + 1];
       const nextRaw = next ? (next.n.at != null ? next.n.at : t0Raw + (n.span || NOTE_BEAD_DUR)) : null;
-      const nextT = nextRaw != null ? nextRaw : null;
-      const gapToNext = nextT != null ? Math.max(0.04, nextT - t0) : null;
-      tFallback = nextRaw ?? t0Raw + (n.span || NOTE_BEAD_DUR);
+      const nextT = nextRaw != null ? playbackAt(nextRaw, preset) : null;
+      const gapToNext = nextT != null ? Math.max(0.06, nextT - t0) : null;
+      tFallback = nextRaw != null ? nextRaw / speed : (t0Raw + (n.span || NOTE_BEAD_DUR)) / speed;
       const legato = gapToNext == null || gapToNext < preset.playback.legatoThreshold;
       const toneDur = playbackToneDur(n, gapToNext, preset);
       const start = base + t0;
@@ -790,8 +801,10 @@ export default function App() {
         if (playable.length) {
           let idx = -1;
           for (let i = 0; i < playable.length; i++) {
-            const a = playable[i].at || 0;
-            const b = playable[i + 1] ? (playable[i + 1].at || a + 0.2) : a + 0.6;
+            const a = playbackAt(playable[i].at || 0, preset);
+            const b = playable[i + 1]
+              ? playbackAt(playable[i + 1].at || (playable[i].at || 0) + 0.2, preset)
+              : a + 0.75;
             if (t >= a && t < b) { idx = i; break; }
           }
           if (idx >= 0) {
