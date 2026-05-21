@@ -1,55 +1,45 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 
 // ─────────────────────────────────────────────
-// MYSCREAM — 비명을 진짜처럼 생긴 (어딘가 이상한) 악보로
-// 이어지는 고함 = 길이를 가진 음표 하나 (길수록 길게 이어짐)
-// 소리 크기 = 셈여림 f / ff / fff / ffff
-// 음표 아래 가사 "AAAAAAH" / "끄아악" 등
-// gliss., 이음줄 같은 연주 기호
+// 악!보 (aakbo) — 비명을 격조있는 클래식 성악 악보로
+// 진짜 악보처럼 정갈한데 가사가 "아아아아악!보"라 어이없음.
+// 길이=음표 길이, 음량=셈여림(f~ffff), 가사=아아아악
+// 나타냄말 / gliss / 페르마타 / breath / 악센트
 // 모든 처리는 브라우저 안에서 (녹음 X, 서버 X)
 // ─────────────────────────────────────────────
 
+const SERIF = "Georgia, 'Times New Roman', 'Nanum Myeongjo', 'Noto Serif KR', 'Apple SD Gothic Neo', serif";
+
 function midiToFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
 
-// 가사 후보 (비명체)
-const LYRICS = ["AAAAAAH", "으아아악", "끄아아~", "아아아아", "으악", "끄앙", "아~", "으아~", "꺄아악", "흐어어", "오아아"];
+// 이탤릭 나타냄말 (음표 위)
+const EXPRESSIONS = ["molto sostenuto", "espressivo, doloroso", "poco meno intenso", "con forza", "agitato", "con dolore", "disperato", "molto vibrato", "senza misura"];
+// 셈여림 아래 영어 설명
+const DYN_NOTES = { ffff: "release everything", fff: "screamed, not sung", ff: "tremendously", f: "with intent", mf: "still holding back", p: "barely audible", pp: "almost silence" };
+// 빠르기말 후보
+const TEMPI = ["Molto drammatico", "Disperato", "Con tutta forza", "Largo doloroso", "Agitato assai"];
+const FOOTERS = ["for one scream and breath", "to be performed only once", "in a single exhalation", "as loud as the body permits"];
+
+// 가사: 길이→'아' 개수, 음량→받침(ㄱ/k)
 function lyricFor(durSec, norm) {
-  // 길이 → '아' 개수, 음량 → 받침(ㄱ/k) 강도
-  // 예: 아아아아아아악 / aaaaaaaa k aaakaaaak
-  const useRoman = Math.random() < 0.4; // 가끔 알파벳으로
+  const useRoman = Math.random() < 0.35;
   const aCount = Math.max(2, Math.round(durSec * 7) + Math.round(norm * 4));
   const a = useRoman ? "a" : "아";
   const kChar = useRoman ? "k" : "ㄱ";
-
-  // 큰 소리일수록 받침이 더 자주/세게
   const kStrength = norm > 0.75 ? 3 : norm > 0.55 ? 2 : norm > 0.3 ? 1 : 0;
-
   let s;
-  if (kStrength === 0) {
-    // 약하면 그냥 아아아 (받침 없이, 가끔 ~)
-    s = a.repeat(aCount);
-    if (durSec > 0.8) s += useRoman ? "~" : "~";
-  } else if (kStrength === 1) {
-    // 끝에 받침
-    s = a.repeat(aCount) + (useRoman ? "k" : "악");
-  } else {
-    // 세면: 중간중간 받침이 끼어들고 끝에도
-    const parts = [];
-    let remain = aCount;
+  if (kStrength === 0) { s = a.repeat(aCount); if (durSec > 0.8) s += "~"; }
+  else if (kStrength === 1) { s = a.repeat(aCount) + (useRoman ? "k" : "악"); }
+  else {
+    const parts = []; let remain = aCount;
     while (remain > 0) {
       const chunk = Math.min(remain, 2 + Math.floor(Math.random() * 4));
-      parts.push(a.repeat(chunk));
-      remain -= chunk;
+      parts.push(a.repeat(chunk)); remain -= chunk;
       if (remain > 0 && Math.random() < 0.5) parts.push(kChar);
     }
-    s = parts.join(useRoman ? " " : "");
-    s += useRoman ? "k" : "악";
+    s = parts.join(useRoman ? " " : ""); s += useRoman ? "k" : "악";
   }
-  // 중간에 끊김(-) 가끔
-  if (durSec > 1.0 && Math.random() < 0.5) {
-    const mid = Math.floor(s.length / 2);
-    s = s.slice(0, mid) + " - " + s.slice(mid);
-  }
+  if (durSec > 1.0 && Math.random() < 0.5) { const mid = Math.floor(s.length / 2); s = s.slice(0, mid) + " - " + s.slice(mid); }
   return s;
 }
 
@@ -61,15 +51,6 @@ function dynamicFor(norm) {
   if (norm > 0.10) return "mf";
   if (norm > 0.05) return "p";
   return "pp";
-}
-
-// 음 길이(초) → 음표 종류(글리프, 박자수)
-function noteGlyph(durSec) {
-  if (durSec < 0.18) return { head: "♬", beats: 0.25 };
-  if (durSec < 0.35) return { head: "♫", beats: 0.5 };
-  if (durSec < 0.7) return { head: "♩", beats: 1 };
-  if (durSec < 1.3) return { head: "♩", beats: 2, tie: true };
-  return { head: "𝅗𝅥", beats: 4, tie: true };
 }
 
 // ── 재생 엔진 ──
@@ -120,10 +101,8 @@ class ScorePlayer {
   }
   play(notes, voice, onStep, onEnd) {
     this.ensureCtx(); this.stop(); this.playing = true;
-    const ctx = this.ctx;
-    const baseStep = 0.16; // 음표 사이 기본 간격
-    let cursor = ctx.currentTime + 0.05;
-    let elapsedMs = 50;
+    const ctx = this.ctx; const baseStep = 0.16;
+    let cursor = ctx.currentTime + 0.05; let elapsedMs = 50;
     notes.forEach((n, i) => {
       const noteDur = Math.max(0.12, Math.min(0.9, n.dur));
       if (n.midi != null) {
@@ -162,18 +141,26 @@ function detectPitch(buf, sampleRate) {
 }
 function freqToMidi(f) { return Math.round(69 + 12 * Math.log2(f / 440)); }
 
-const LOW_MIDI = 55, HIGH_MIDI = 81; // 표시 범위
-
-// midi → 오선 위 y (staff 좌표). 높을수록 위.
+const LOW_MIDI = 57, HIGH_MIDI = 79;
 function staffY(midi, top, staffH) {
   const c = Math.max(LOW_MIDI - 5, Math.min(HIGH_MIDI + 5, midi));
   const r = (c - LOW_MIDI) / (HIGH_MIDI - LOW_MIDI);
   return top + staffH - r * staffH;
 }
 
+// 첫 화면용 예시 악보 데이터 (레퍼런스 재현)
+const DEMO_NOTES = [
+  { midi: 69, norm: 0.95, dur: 1.6, gliss: true, glissTo: 73, dyn: "fff", lyric: "아아아아아아악!보", expr: "molto sostenuto", fermata: true },
+  { midi: 67, norm: 0.9, dur: 1.4, dyn: "fff", lyric: "아아아아아아", expr: "espressivo, doloroso", tie: true },
+  { midi: 0, rest: true },
+  { midi: 65, norm: 0.7, dur: 1.0, dyn: "ff", lyric: "아아아아", expr: "poco meno intenso" },
+  { midi: 0, rest: true, breath: true },
+  { midi: 64, norm: 0.95, dur: 0.6, dyn: "fff", lyric: "아아악 보", expr: "con forza", accent: true, fermata: true },
+];
+
 export default function App() {
   const [phase, setPhase] = useState("idle");
-  const [notes, setNotes] = useState([]);   // 묶인 음표들
+  const [notes, setNotes] = useState([]);
   const [level, setLevel] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [result, setResult] = useState(null);
@@ -182,6 +169,7 @@ export default function App() {
   const [voice, setVoice] = useState("piano");
   const [playing, setPlaying] = useState(false);
   const [playIdx, setPlayIdx] = useState(-1);
+  const [meta, setMeta] = useState({ tempo: "Molto drammatico", bpm: 72, footer: "for one scream and breath" });
 
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
@@ -192,9 +180,9 @@ export default function App() {
 
   const startRef = useRef(0);
   const notesRef = useRef([]);
-  const curNoteRef = useRef(null);   // 현재 진행 중인(이어지는) 음표
+  const curNoteRef = useRef(null);
   const lastMidiRef = useRef(null);
-  const lastVoiceTimeRef = useRef(0); // 마지막으로 소리난 시각
+  const lastVoiceTimeRef = useRef(0);
 
   const inIframe = (() => { try { return window.self !== window.top; } catch (e) { return true; } })();
   const isSecure = typeof window !== "undefined" && window.isSecureContext;
@@ -206,7 +194,6 @@ export default function App() {
     if (audioCtxRef.current && audioCtxRef.current.state !== "closed") audioCtxRef.current.close();
     rafRef.current = null; streamRef.current = null; audioCtxRef.current = null; analyserRef.current = null;
   }, []);
-
   useEffect(() => () => cleanup(), [cleanup]);
 
   const tick = useCallback(() => {
@@ -218,7 +205,6 @@ export default function App() {
     const rms = Math.sqrt(sum / timeBufRef.current.length);
     const norm = Math.min(1, rms * 3.5);
     setLevel(norm);
-
     const freq = detectPitch(timeBufRef.current, ctx.sampleRate);
     let midi = null;
     if (freq > 0 && norm > 0.09) {
@@ -227,47 +213,33 @@ export default function App() {
       if (prev != null) { while (midi - prev > 8) midi -= 12; while (prev - midi > 8) midi += 12; }
       lastMidiRef.current = midi;
     }
-
     const now = performance.now();
     setElapsed((now - startRef.current) / 1000);
     const VOICING = norm > 0.1 && midi != null;
-
     if (VOICING) {
       lastVoiceTimeRef.current = now;
       const cur = curNoteRef.current;
       if (cur && Math.abs((cur.lastMidi ?? midi) - midi) <= 2) {
-        // 같은 음 계속 → 길이 늘리고, 음정 살짝 변하면 gliss 표시
         cur.dur = (now - cur.startMs) / 1000;
-        cur.norm = Math.max(cur.norm, norm);
         cur.peakMidi = norm > cur.peakNorm ? midi : cur.peakMidi;
         if (norm > cur.peakNorm) cur.peakNorm = norm;
         if (Math.abs(midi - cur.midi) >= 2) { cur.gliss = true; cur.glissTo = midi; }
         cur.lastMidi = midi;
         commitCurrent(false);
       } else {
-        // 새 음표 시작 (이전 건 확정)
         finalizeCurrent();
-        curNoteRef.current = {
-          midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm,
-          startMs: now, dur: 0.12, gliss: false, glissTo: null, lyric: null,
-        };
+        curNoteRef.current = { midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm, startMs: now, dur: 0.12, gliss: false, glissTo: null };
         commitCurrent(true);
       }
     } else {
-      // 무음: 일정 시간 지나면 현재 음표 확정 (쉼표 구간)
       if (now - lastVoiceTimeRef.current > 160) finalizeCurrent();
     }
     rafRef.current = requestAnimationFrame(tick);
 
     function commitCurrent(isNew) {
-      // 진행 중 음표를 화면에 반영 (마지막 항목 교체/추가)
-      const arr = notesRef.current;
-      const draft = { ...curNoteRef.current, live: true };
-      if (isNew || arr.length === 0 || !arr[arr.length - 1].live) {
-        notesRef.current = [...arr, draft];
-      } else {
-        notesRef.current = [...arr.slice(0, -1), draft];
-      }
+      const arr = notesRef.current; const draft = { ...curNoteRef.current, live: true };
+      if (isNew || arr.length === 0 || !arr[arr.length - 1].live) notesRef.current = [...arr, draft];
+      else notesRef.current = [...arr.slice(0, -1), draft];
       setNotes(notesRef.current);
     }
     function finalizeCurrent() {
@@ -275,10 +247,10 @@ export default function App() {
       const dur = Math.max(0.12, cur.dur);
       const fin = {
         midi: cur.peakMidi ?? cur.midi, norm: cur.peakNorm, dur,
-        gliss: cur.gliss, glissTo: cur.glissTo,
-        dyn: dynamicFor(cur.peakNorm),
+        gliss: cur.gliss, glissTo: cur.glissTo, dyn: dynamicFor(cur.peakNorm),
         lyric: lyricFor(dur, cur.peakNorm),
-        live: false,
+        expr: Math.random() < 0.5 ? EXPRESSIONS[Math.floor(Math.random() * EXPRESSIONS.length)] : null,
+        fermata: dur > 1.2, accent: cur.peakNorm > 0.7 && dur < 0.6, live: false,
       };
       const arr = notesRef.current;
       if (arr.length && arr[arr.length - 1].live) notesRef.current = [...arr.slice(0, -1), fin];
@@ -308,20 +280,24 @@ export default function App() {
   }, [tick, hasMic]);
 
   const stop = useCallback(() => {
-    // 진행 중 음표 마무리
     const cur = curNoteRef.current;
     if (cur) {
       const dur = Math.max(0.12, cur.dur);
-      const fin = { midi: cur.peakMidi ?? cur.midi, norm: cur.peakNorm, dur, gliss: cur.gliss, glissTo: cur.glissTo, dyn: dynamicFor(cur.peakNorm), lyric: lyricFor(dur, cur.peakNorm), live: false };
+      const fin = { midi: cur.peakMidi ?? cur.midi, norm: cur.peakNorm, dur, gliss: cur.gliss, glissTo: cur.glissTo, dyn: dynamicFor(cur.peakNorm), lyric: lyricFor(dur, cur.peakNorm), expr: EXPRESSIONS[Math.floor(Math.random()*EXPRESSIONS.length)], fermata: dur > 1.2, accent: cur.peakNorm > 0.7 && dur < 0.6, live: false };
       const arr = notesRef.current;
       if (arr.length && arr[arr.length - 1].live) notesRef.current = [...arr.slice(0, -1), fin];
       else notesRef.current = [...arr, fin];
       curNoteRef.current = null;
-    } else {
-      notesRef.current = notesRef.current.map((n) => ({ ...n, live: false }));
-    }
+    } else notesRef.current = notesRef.current.map((n) => ({ ...n, live: false }));
+    // 마지막 음표에 늘임표 강제
+    if (notesRef.current.length) { const last = notesRef.current.length - 1; notesRef.current = notesRef.current.map((n, i) => i === last ? { ...n, fermata: true } : n); }
     setNotes(notesRef.current);
     const dur = (performance.now() - startRef.current) / 1000;
+    setMeta({
+      tempo: TEMPI[Math.floor(Math.random() * TEMPI.length)],
+      bpm: 60 + Math.floor(Math.random() * 40),
+      footer: FOOTERS[Math.floor(Math.random() * FOOTERS.length)],
+    });
     setResult({ dur, count: notesRef.current.length, ts: new Date(), no: Math.floor(Math.random() * 9000) + 1000 });
     setPhase("done");
     cleanup();
@@ -336,27 +312,26 @@ export default function App() {
   const saveImage = useCallback(() => {
     if (!result) return; setSaving(true);
     try {
-      drawStaffOnly({ notes: notesRef.current, onBlob: (blob) => {
+      drawScoreSheet({ notes: notesRef.current, meta, onBlob: (blob) => {
         const url = URL.createObjectURL(blob); const a = document.createElement("a");
         const d = result.ts; a.href = url;
         a.download = `aakbo-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}.png`;
         a.click(); URL.revokeObjectURL(url); setSaving(false);
       }});
     } catch (e) { setSaving(false); alert("이미지 저장에 실패했어요."); }
-  }, [result]);
+  }, [result, meta]);
 
   const togglePlay = useCallback(() => {
     if (!playerRef.current) playerRef.current = new ScorePlayer();
     const p = playerRef.current;
     if (playing) { p.stop(); setPlaying(false); setPlayIdx(-1); return; }
     setPlaying(true);
-    p.play(notesRef.current, voice, (i) => setPlayIdx(i), () => { setPlaying(false); setPlayIdx(-1); });
+    p.play(notesRef.current.filter(n => !n.rest), voice, (i) => setPlayIdx(i), () => { setPlaying(false); setPlayIdx(-1); });
   }, [playing, voice]);
 
   const changeVoice = useCallback((v) => {
     if (playerRef.current) playerRef.current.stop(); setPlaying(false); setPlayIdx(-1); setVoice(v);
   }, []);
-
   useEffect(() => () => { if (playerRef.current) playerRef.current.stop(); }, []);
 
   const copyLink = useCallback(async () => {
@@ -372,145 +347,221 @@ export default function App() {
         {phase === "arming" && <div style={S.center}><p style={S.armText}>마이크 권한 허용해줘…</p></div>}
         {phase === "denied" && <DeniedView diag={diag} inIframe={inIframe} isSecure={isSecure} hasMic={hasMic} onReset={reset} />}
         {phase === "recording" && <RecordView notes={notes} level={level} elapsed={elapsed} onStop={stop} />}
-        {phase === "done" && result && <DoneView notes={notes} r={result} onReset={reset} onSave={saveImage} onCopy={copyLink} saving={saving} voice={voice} onVoice={changeVoice} playing={playing} playIdx={playIdx} onTogglePlay={togglePlay} />}
+        {phase === "done" && result && <DoneView notes={notes} meta={meta} r={result} onReset={reset} onSave={saveImage} onCopy={copyLink} saving={saving} voice={voice} onVoice={changeVoice} playing={playing} playIdx={playIdx} onTogglePlay={togglePlay} />}
       </div>
-      <p style={S.privacy}>🔒 소리는 녹음되지 않아요. 음정·음량만 분석하고 바로 사라집니다.</p>
     </div>
   );
 }
 
 const pad = (n) => String(n).padStart(2, "0");
 
-// ── 악보 SVG: 진짜 같은데 이상한 ──
-// 음표 = 머리(음높이 위치) + 기둥 + 가사 + 셈여림 + gliss
-function ScoreSvg({ notes, W, playIdx = -1 }) {
-  const padX = 16, topPad = 14;
-  const staffH = 48, gap = staffH / 4;
-  const blockH = staffH + 56; // 위 셈여림 + 아래 가사 공간
-  // 음표 폭: 길이에 비례
-  const layout = [];
-  let x = padX + 20, line = 0;
-  const lineMaxX = W - padX - 10;
-  notes.forEach((n, i) => {
-    const w = 14 + Math.min(70, n.dur * 46); // 길수록 넓게
-    if (x + w > lineMaxX) { line++; x = padX + 20; }
-    layout.push({ n, i, x, w, line });
-    x += w + 5;
-  });
-  const totalLines = Math.max(3, (layout.length ? layout[layout.length - 1].line + 1 : 1));
-  const H = topPad + totalLines * blockH + 8;
+// 가사 미리보기 한 줄 (제목 아래)
+function lyricLine(notes) {
+  const ls = notes.filter(n => n.lyric).map(n => n.lyric);
+  return ls.length ? ls.join(" ") : "아아아아아아악!보 아아아아아아 - 아아아아 - 아아악 보";
+}
 
-  const staffGroups = [];
-  for (let li = 0; li < totalLines; li++) {
-    const top = topPad + li * blockH + 26;
-    staffGroups.push(
-      <g key={`st${li}`}>
-        {[0,1,2,3,4].map((k) => <line key={k} x1={padX} y1={top + k*gap} x2={W - padX} y2={top + k*gap} stroke="#1a1a1a" strokeWidth="0.7" />)}
-        <text x={padX - 2} y={top + staffH*0.66} fontSize={gap*2.7} fill="#1a1a1a" style={{fontFamily:"serif"}}>𝄞</text>
-      </g>
-    );
+// ── 악보 SVG (레퍼런스 톤) ──
+function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true }) {
+  const padX = 30, gap = 7.5, staffH = gap * 4;
+  const noteTop = 56;
+  const blockH = staffH + 92;
+  const layout = []; let x = padX + 64, line = 0; const lineMaxX = W - padX - 14;
+  notes.forEach((n, i) => {
+    const w = n.rest ? 22 : 22 + Math.min(80, (n.dur || 0.4) * 48);
+    if (x + w > lineMaxX) { line++; x = padX + 64; }
+    layout.push({ n, i, x, w, line }); x += w + 10;
+  });
+  const totalLines = Math.max(1, (layout.length ? layout[layout.length - 1].line + 1 : 1));
+  const headH = showHeader ? 30 : 6;
+  const H = noteTop + headH + totalLines * blockH;
+
+  const els = [];
+
+  // 빠르기말 (좌상) + 우상 지시문
+  if (showHeader) {
+    els.push(<text key="tempo" x={padX} y={36} fontSize="13" fontWeight="700" fill="#111" style={{fontFamily:SERIF}}>{meta.tempo}</text>);
+    els.push(<text key="bpm" x={padX + meta.tempo.length * 7.6 + 18} y={37} fontSize="12" fill="#111" style={{fontFamily:SERIF}}>♩ = {meta.bpm}</text>);
+    els.push(<text key="within" x={W - padX} y={36} fontSize="11" fontStyle="italic" fill="#111" textAnchor="end" style={{fontFamily:SERIF}}>scream it from within</text>);
   }
 
-  const noteEls = layout.map(({ n, i, x, w, line }) => {
-    const top = topPad + line * blockH + 26;
-    const isPlay = i === playIdx;
-    const col = isPlay ? "#e0245e" : "#111";
-    const y = staffY(n.midi, top, staffH);
-    const isLong = n.dur >= 0.7;
-    const headRx = 5.2, headRy = 3.8;
-    const els = [];
-
-    // 음표 머리 (긴 음은 빈 머리). 클래식 악보처럼 살짝만 기울임
-    els.push(
-      <ellipse key={`h${i}`} cx={x} cy={y} rx={headRx} ry={headRy} transform={`rotate(-12 ${x} ${y})`}
-        fill={isLong ? "#fffdf7" : col} stroke={col} strokeWidth={isLong ? 1.5 : 0} />
-    );
-    // 기둥
-    els.push(<line key={`stem${i}`} x1={x + headRx - 0.5} y1={y} x2={x + headRx - 0.5} y2={y - 25} stroke={col} strokeWidth="1.2" />);
-    // 길면 음표를 길게 끄는 타이(이음줄)
-    if (isLong) {
-      els.push(<path key={`tiec${i}`} d={`M ${x+3} ${y+5} Q ${x + w/2} ${y+13} ${x + w - 4} ${y+5}`} fill="none" stroke={col} strokeWidth="1" opacity="0.6" />);
+  for (let li = 0; li < totalLines; li++) {
+    const top = noteTop + headH + li * blockH + 8;
+    // 오선 5줄
+    for (let k = 0; k < 5; k++) els.push(<line key={`s${li}-${k}`} x1={padX} y1={top + k*gap} x2={W - padX} y2={top + k*gap} stroke="#111" strokeWidth="0.8" />);
+    // 끝 세로 마디줄(마지막 단만 굵게)
+    els.push(<line key={`bar${li}`} x1={W - padX} y1={top} x2={W - padX} y2={top + staffH} stroke="#111" strokeWidth={li === totalLines-1 ? 2.4 : 0.8} />);
+    // 높은음자리표
+    els.push(<text key={`clef${li}`} x={padX - 2} y={top + staffH*0.92} fontSize={staffH*1.55} fill="#111" style={{fontFamily:SERIF}}>𝄞</text>);
+    // Voice 파트명 + 박자표(첫 단만)
+    if (li === 0) {
+      els.push(<text key="voice" x={padX - 28} y={top + staffH/2 + 4} fontSize="11" fill="#111" textAnchor="end" style={{fontFamily:SERIF}}>Voice</text>);
+      els.push(<text key="ts1" x={padX + 26} y={top + gap*1.9} fontSize={gap*2.2} fontWeight="700" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>4</text>);
+      els.push(<text key="ts2" x={padX + 26} y={top + gap*3.9} fontSize={gap*2.2} fontWeight="700" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>4</text>);
     }
-    // 짧으면 깃발 (단정하게)
-    if (n.dur < 0.18) els.push(<path key={`fl${i}`} d={`M ${x+headRx-0.5} ${y-25} q 6 3 5 11`} fill="none" stroke={col} strokeWidth="1.2" />);
-    // gliss 사선 + 글자
+  }
+
+  layout.forEach(({ n, i, x, w, line }) => {
+    const top = noteTop + headH + line * blockH + 8;
+    const isPlay = i === playIdx;
+    const col = isPlay ? "#c0143c" : "#111";
+
+    if (n.rest) {
+      // 온쉼표(넷째 줄 위 막대) 또는 breath
+      els.push(<rect key={`rest${i}`} x={x - 5} y={top + gap - 2} width="10" height="3.2" fill={col} />);
+      if (n.breath) els.push(<text key={`br${i}`} x={x} y={top - 6} fontSize="10" fontStyle="italic" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>(breath)</text>);
+      return;
+    }
+
+    const y = staffY(n.midi, top, staffH);
+    const isLong = (n.dur || 0.4) >= 0.7;
+    const headRx = 5.6, headRy = 4.0;
+
+    // 나타냄말 (음표 위)
+    if (n.expr) els.push(<text key={`ex${i}`} x={x} y={top - 8} fontSize="9.5" fontStyle="italic" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>{n.expr}</text>);
+    // 늘임표(페르마타)
+    if (n.fermata) {
+      els.push(<path key={`fmA${i}`} d={`M ${x-7} ${top - 16} A 7 7 0 0 1 ${x+7} ${top-16}`} fill="none" stroke={col} strokeWidth="1" />);
+      els.push(<circle key={`fmD${i}`} cx={x} cy={top - 17} r="1.3" fill={col} />);
+    }
+    // 악센트(>)
+    if (n.accent) els.push(<text key={`ac${i}`} x={x} y={top - 16} fontSize="13" fill={col} textAnchor="middle" style={{fontFamily:SERIF}}>&gt;</text>);
+
+    // 음표 머리 (긴 음=빈 머리, 짧은 음=채운 머리)
+    els.push(<ellipse key={`h${i}`} cx={x} cy={y} rx={headRx} ry={headRy} transform={`rotate(-15 ${x} ${y})`} fill={isLong ? "#fff" : col} stroke={col} strokeWidth={isLong ? 1.5 : 0} />);
+    // 기둥
+    els.push(<line key={`st${i}`} x1={x + headRx - 0.4} y1={y} x2={x + headRx - 0.4} y2={y - 26} stroke={col} strokeWidth="1.2" />);
+    // 늘임선(긴 음): 가로로 길게 끄는 선 + 타이
+    if (isLong) {
+      els.push(<line key={`ext${i}`} x1={x + headRx + 2} y1={y} x2={x + w - 2} y2={y} stroke={col} strokeWidth="1" />);
+      els.push(<path key={`tie${i}`} d={`M ${x+4} ${y+5} Q ${x + w/2} ${y+13} ${x + w - 4} ${y+5}`} fill="none" stroke={col} strokeWidth="0.9" opacity="0.6" />);
+    }
+    // gliss 점선 + 글자
     if (n.gliss && n.glissTo != null) {
       const y2 = staffY(n.glissTo, top, staffH);
-      els.push(<line key={`gl${i}`} x1={x + 4} y1={y} x2={x + w} y2={y2} stroke={col} strokeWidth="0.9" strokeDasharray="2 2" />);
-      els.push(<text key={`glt${i}`} x={x + w/2} y={(y + y2)/2 - 4} fontSize="7" fill={col} fontStyle="italic" textAnchor="middle">gliss.</text>);
+      els.push(<line key={`gl${i}`} x1={x + headRx + 2} y1={y - 1} x2={x + w - 2} y2={y2 - 1} stroke={col} strokeWidth="0.8" strokeDasharray="1.5 2.5" />);
+      els.push(<text key={`glt${i}`} x={x + w*0.55} y={Math.min(y,y2) - 6} fontSize="8" fontStyle="italic" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>gliss.</text>);
     }
-    // 셈여림 (오선 아래쪽, 음표 밑)
-    els.push(<text key={`dyn${i}`} x={x} y={top + staffH + 13} fontSize="11" fill={col} fontStyle="italic" fontWeight="700" textAnchor="middle" style={{fontFamily:"serif"}}>{n.dyn}</text>);
-    // 가사 (그 아래) — 길어질 수 있으니 작게
-    els.push(<text key={`ly${i}`} x={x} y={top + staffH + 27} fontSize="7.5" fill="#222" textAnchor="middle">{n.lyric}</text>);
-
-    return <g key={`n${i}`}>{els}</g>;
+    // 가사 (오선 아래)
+    els.push(<text key={`ly${i}`} x={x} y={top + staffH + 22} fontSize="10" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>{n.lyric}{isLong ? "" : ""}</text>);
+    if (isLong) els.push(<line key={`lyu${i}`} x1={x + 10} y1={top + staffH + 24} x2={x + w} y2={top + staffH + 24} stroke="#111" strokeWidth="0.6" />);
+    // 셈여림 (큼지막 이탤릭) + 영어 설명
+    els.push(<text key={`dy${i}`} x={x} y={top + staffH + 48} fontSize="20" fontStyle="italic" fontWeight="700" fill={col} textAnchor="middle" style={{fontFamily:SERIF}}>{n.dyn}</text>);
+    els.push(<text key={`dyn${i}`} x={x} y={top + staffH + 64} fontSize="8.5" fontStyle="italic" fill="#444" textAnchor="middle" style={{fontFamily:SERIF}}>{DYN_NOTES[n.dyn] || ""}</text>);
   });
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
-      <rect x="0" y="0" width={W} height={H} fill="#fffdf7" />
-      {staffGroups}
-      {noteEls}
+      <rect x="0" y="0" width={W} height={H} fill="#fff" />
+      {els}
     </svg>
   );
 }
 
-// 저장용 캔버스 (동일 레이아웃)
-function drawStaffOnly({ notes, onBlob }) {
-  const W = 860, dpr = 2, padX = 40, topPad = 24;
-  const staffH = 60, gap = staffH / 4, blockH = staffH + 64;
-  const layout = []; let x = padX + 26, line = 0; const lineMaxX = W - padX - 16;
+// ── 저장용 캔버스 (전체 시트: 제목+가사줄+악보+푸터) ──
+function drawScoreSheet({ notes, meta, onBlob }) {
+  const W = 1000, dpr = 2, padX = 70;
+  const gap = 9, staffH = gap * 4, blockH = staffH + 120;
+  const layout = []; let x = padX + 70, line = 0; const lineMaxX = W - padX - 20;
   notes.forEach((n, i) => {
-    const w = 18 + Math.min(90, n.dur * 58);
-    if (x + w > lineMaxX) { line++; x = padX + 26; }
-    layout.push({ n, i, x, w, line }); x += w + 7;
+    const w = n.rest ? 30 : 30 + Math.min(110, (n.dur || 0.4) * 64);
+    if (x + w > lineMaxX) { line++; x = padX + 70; }
+    layout.push({ n, i, x, w, line }); x += w + 12;
   });
-  const totalLines = Math.max(3, (layout.length ? layout[layout.length - 1].line + 1 : 1));
-  const H = topPad + totalLines * blockH + 16;
+  const totalLines = Math.max(1, (layout.length ? layout[layout.length - 1].line + 1 : 1));
+  const titleH = 230;
+  const scoreTop = titleH;
+  const H = scoreTop + totalLines * blockH + 150;
 
   const canvas = document.createElement("canvas");
   canvas.width = W * dpr; canvas.height = H * dpr;
   const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#fffdf7"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
+  const cx = W / 2;
 
+  // 제목
+  ctx.fillStyle = "#111"; ctx.textAlign = "center";
+  ctx.font = `64px ${SERIF}`; ctx.fillText("SCREAM SCORE", cx, 90);
+  // 가사 한 줄
+  const ll = lyricLine(notes);
+  ctx.font = `22px ${SERIF}`; ctx.fillText(ll, cx, 130);
+  // 빠르기말
+  ctx.textAlign = "left"; ctx.font = `bold 17px ${SERIF}`;
+  ctx.fillText(meta.tempo, padX, 195);
+  ctx.font = `15px ${SERIF}`;
+  ctx.fillText(`♩ = ${meta.bpm}`, padX + ctx.measureText(meta.tempo).width + 24, 196);
+  ctx.textAlign = "right"; ctx.font = `italic 14px ${SERIF}`;
+  ctx.fillText("scream it from within", W - padX, 195);
+
+  // 오선/음표
   for (let li = 0; li < totalLines; li++) {
-    const top = topPad + li * blockH + 30;
-    ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 0.8;
+    const top = scoreTop + li * blockH + 10;
+    ctx.strokeStyle = "#111"; ctx.lineWidth = 1;
     for (let k = 0; k < 5; k++) { ctx.beginPath(); ctx.moveTo(padX, top + k*gap); ctx.lineTo(W - padX, top + k*gap); ctx.stroke(); }
-    ctx.fillStyle = "#1a1a1a"; ctx.font = `${gap*2.7}px serif`; ctx.textAlign = "left";
-    ctx.fillText("\u{1D11E}", padX - 4, top + staffH*0.7);
+    ctx.lineWidth = li === totalLines-1 ? 3 : 1;
+    ctx.beginPath(); ctx.moveTo(W - padX, top); ctx.lineTo(W - padX, top + staffH); ctx.stroke();
+    ctx.fillStyle = "#111"; ctx.font = `${staffH*1.5}px ${SERIF}`; ctx.textAlign = "left";
+    ctx.fillText("\u{1D11E}", padX - 4, top + staffH*0.95);
+    if (li === 0) {
+      ctx.textAlign = "right"; ctx.font = `15px ${SERIF}`;
+      ctx.fillText("Voice", padX - 36, top + staffH/2 + 5);
+      ctx.textAlign = "center"; ctx.font = `bold ${gap*2.1}px ${SERIF}`;
+      ctx.fillText("4", padX + 42, top + gap*1.9);
+      ctx.fillText("4", padX + 42, top + gap*3.9);
+    }
   }
 
   layout.forEach(({ n, x, w, line }) => {
-    const top = topPad + line * blockH + 30;
+    const top = scoreTop + line * blockH + 10;
+    if (n.rest) {
+      ctx.fillStyle = "#111"; ctx.fillRect(x - 7, top + gap - 3, 14, 4);
+      if (n.breath) { ctx.font = `italic 13px ${SERIF}`; ctx.textAlign = "center"; ctx.fillText("(breath)", x, top - 8); }
+      return;
+    }
     const y = staffYC(n.midi, top, staffH);
-    const isLong = n.dur >= 0.7;
-    const headRx = 6.5, headRy = 4.8;
-    ctx.save(); ctx.translate(x, y); ctx.rotate(-12 * Math.PI/180);
+    const isLong = (n.dur || 0.4) >= 0.7;
+    const headRx = 7.2, headRy = 5.2;
+    if (n.expr) { ctx.fillStyle = "#111"; ctx.font = `italic 12px ${SERIF}`; ctx.textAlign = "center"; ctx.fillText(n.expr, x, top - 10); }
+    if (n.fermata) {
+      ctx.strokeStyle = "#111"; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(x, top - 18, 9, Math.PI, 0); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, top - 20, 1.7, 0, Math.PI*2); ctx.fillStyle = "#111"; ctx.fill();
+    }
+    if (n.accent) { ctx.fillStyle = "#111"; ctx.font = `16px ${SERIF}`; ctx.textAlign = "center"; ctx.fillText(">", x, top - 18); }
+    // 머리
+    ctx.save(); ctx.translate(x, y); ctx.rotate(-15 * Math.PI/180);
     ctx.beginPath(); ctx.ellipse(0, 0, headRx, headRy, 0, 0, Math.PI*2);
-    if (isLong) { ctx.fillStyle = "#fffdf7"; ctx.fill(); ctx.strokeStyle = "#111"; ctx.lineWidth = 1.8; ctx.stroke(); }
+    if (isLong) { ctx.fillStyle = "#fff"; ctx.fill(); ctx.strokeStyle = "#111"; ctx.lineWidth = 1.8; ctx.stroke(); }
     else { ctx.fillStyle = "#111"; ctx.fill(); }
     ctx.restore();
     ctx.strokeStyle = "#111"; ctx.lineWidth = 1.4;
-    ctx.beginPath(); ctx.moveTo(x + headRx, y); ctx.lineTo(x + headRx, y - 30); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + headRx, y); ctx.lineTo(x + headRx, y - 32); ctx.stroke();
     if (isLong) {
-      ctx.strokeStyle = "rgba(17,17,17,0.5)"; ctx.lineWidth = 1.1;
-      ctx.beginPath(); ctx.moveTo(x + 2, y + 8); ctx.quadraticCurveTo(x + w/2, y + 18, x + w - 4, y + 8); ctx.stroke();
+      ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(x + headRx + 2, y); ctx.lineTo(x + w - 2, y); ctx.stroke();
+      ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x + 5, y + 6); ctx.quadraticCurveTo(x + w/2, y + 16, x + w - 5, y + 6); ctx.stroke();
     }
-    if (n.dur < 0.18) { ctx.strokeStyle = "#111"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(x+headRx, y-30); ctx.quadraticCurveTo(x+headRx+8, y-26, x+headRx+5, y-16); ctx.stroke(); }
     if (n.gliss && n.glissTo != null) {
       const y2 = staffYC(n.glissTo, top, staffH);
-      ctx.strokeStyle = "#111"; ctx.lineWidth = 0.9; ctx.setLineDash([2,2]);
-      ctx.beginPath(); ctx.moveTo(x + 5, y); ctx.lineTo(x + w, y2); ctx.stroke(); ctx.setLineDash([]);
-      ctx.fillStyle = "#111"; ctx.font = "italic 9px serif"; ctx.textAlign = "center";
-      ctx.fillText("gliss.", x + w/2, (y + y2)/2 - 5);
+      ctx.strokeStyle = "#111"; ctx.lineWidth = 1; ctx.setLineDash([2,3]);
+      ctx.beginPath(); ctx.moveTo(x + headRx + 2, y - 1); ctx.lineTo(x + w - 2, y2 - 1); ctx.stroke(); ctx.setLineDash([]);
+      ctx.font = `italic 11px ${SERIF}`; ctx.textAlign = "center"; ctx.fillStyle = "#111";
+      ctx.fillText("gliss.", x + w*0.55, Math.min(y,y2) - 8);
     }
-    ctx.fillStyle = "#111"; ctx.font = "italic 700 13px serif"; ctx.textAlign = "center";
-    ctx.fillText(n.dyn, x, top + staffH + 16);
-    ctx.fillStyle = "#222"; ctx.font = "10px 'Courier New', monospace";
-    ctx.fillText(n.lyric, x, top + staffH + 32);
+    ctx.fillStyle = "#111"; ctx.font = `13px ${SERIF}`; ctx.textAlign = "center";
+    ctx.fillText(n.lyric, x, top + staffH + 28);
+    if (isLong) { ctx.strokeStyle = "#111"; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.moveTo(x + 14, top + staffH + 31); ctx.lineTo(x + w, top + staffH + 31); ctx.stroke(); }
+    ctx.font = `italic bold 26px ${SERIF}`; ctx.fillText(n.dyn, x, top + staffH + 62);
+    ctx.font = `italic 11px ${SERIF}`; ctx.fillStyle = "#444"; ctx.fillText(DYN_NOTES[n.dyn] || "", x, top + staffH + 80);
   });
+
+  // 푸터
+  const fy = H - 70;
+  ctx.strokeStyle = "#111"; ctx.lineWidth = 0.8;
+  ctx.beginPath(); ctx.moveTo(padX, fy); ctx.lineTo(W*0.34, fy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(W*0.66, fy); ctx.lineTo(W - padX, fy); ctx.stroke();
+  ctx.fillStyle = "#111"; ctx.font = `italic 16px ${SERIF}`; ctx.textAlign = "center";
+  ctx.fillText(meta.footer, cx, fy + 5);
+
   canvas.toBlob((blob) => onBlob(blob), "image/png");
 }
 function staffYC(midi, top, staffH) {
@@ -520,36 +571,41 @@ function staffYC(midi, top, staffH) {
 }
 
 function IdleView({ onStart, inIframe }) {
+  const demoMeta = { tempo: "Molto drammatico", bpm: 72 };
   return (
-    <div style={S.card}>
-      <p style={S.brand}>SCREAM SCORE · aakbo</p>
-      <h1 style={S.title}>악!보</h1>
-      <p style={S.subname}>aakbo</p>
-      <p style={S.desc}>빈 악보가 너를 기다린다.<br />길게 지를수록 음표가 길어지고,<br />크게 지를수록 f, ff, fff…가 붙는다.</p>
-      {inIframe && (<div style={S.iframeNote}>⚠️ 미리보기(iframe)에선 마이크가 막혀요.<br /><b>새 창(↗) 또는 배포 주소</b>에서 열어주세요.</div>)}
-      <button style={S.btnMain} onClick={onStart}>🎤 채보 시작</button>
+    <div style={S.sheet}>
+      <h1 style={S.bigTitle}>SCREAM SCORE</h1>
+      <p style={S.lyricSub}>아아아아아아악!보 아아아아아아 - 아아아아 - 아아악 보</p>
+      <div style={S.demoScore}>
+        <ScoreSheet notes={DEMO_NOTES} meta={demoMeta} W={760} showHeader />
+      </div>
+      <p style={S.footerLine}>— for one scream and breath —</p>
+      <p style={S.aakboName}>악!보 <span style={{color:"#aaa", letterSpacing:3}}>aakbo</span></p>
+      {inIframe && (<div style={S.iframeNote}>⚠️ 미리보기(iframe)에선 마이크가 막혀요. <b>새 창(↗) 또는 배포 주소</b>에서 열어주세요.</div>)}
+      <button style={S.btnMain} onClick={onStart}>🎤 한 번의 비명을 채보하기</button>
     </div>
   );
 }
 
 function RecordView({ notes, level, elapsed, onStop }) {
   return (
-    <div style={S.card}>
+    <div style={S.sheet}>
       <p style={S.recLabel}>● 기록 중  {elapsed.toFixed(1)}s</p>
-      <div style={S.staffWrapLive}><ScoreSvg notes={notes} W={340} /></div>
+      <div style={S.liveScore}><ScoreSheet notes={notes} meta={{tempo:"…",bpm:72}} W={760} showHeader={false} /></div>
       <div style={S.meterMini}><div style={{ ...S.meterFill, width: `${level * 100}%` }} /></div>
       <button style={S.btnStop} onClick={onStop}>■ 채보 끝내기</button>
     </div>
   );
 }
 
-function DoneView({ notes, r, onReset, onSave, onCopy, saving, voice, onVoice, playing, playIdx, onTogglePlay }) {
+function DoneView({ notes, meta, r, onReset, onSave, onCopy, saving, voice, onVoice, playing, playIdx, onTogglePlay }) {
   return (
     <>
-      <div style={S.card} className="pop">
-        <p style={S.brand}>악!보 — No.{r.no}</p>
-        <p style={S.doneTitle}>악!보 <span style={{fontSize:14,fontStyle:"normal",letterSpacing:1,color:"#9a9484"}}>aakbo</span></p>
-        <div style={{ ...S.staffWrap, maxHeight: 420, overflowY: "auto" }}><ScoreSvg notes={notes} W={340} playIdx={playIdx} /></div>
+      <div style={S.sheet} className="pop">
+        <h1 style={S.bigTitle}>SCREAM SCORE</h1>
+        <p style={S.lyricSub}>{lyricLine(notes)}</p>
+        <div style={S.doneScore}><ScoreSheet notes={notes} meta={meta} W={760} playIdx={playIdx} showHeader /></div>
+        <p style={S.footerLine}>— {meta.footer} —</p>
         <div style={S.playerBox}>
           <div style={S.voiceRow}>
             <button style={voice === "piano" ? S.voiceOn : S.voiceOff} onClick={() => onVoice("piano")}>🎹 피아노</button>
@@ -560,7 +616,7 @@ function DoneView({ notes, r, onReset, onSave, onCopy, saving, voice, onVoice, p
         </div>
       </div>
       <div style={S.actions}>
-        <button style={S.btnMain} onClick={onSave} disabled={saving}>{saving ? "저장 중…" : "🎼 오선지 이미지 저장"}</button>
+        <button style={S.btnMain} onClick={onSave} disabled={saving}>{saving ? "저장 중…" : "🎼 악보 이미지 저장"}</button>
         <div style={S.actionRow}>
           <button style={S.btnHalf} onClick={onCopy}>🔗 링크 복사</button>
           <button style={S.btnHalf} onClick={onReset}>다시 지르기</button>
@@ -596,46 +652,50 @@ function DeniedView({ diag, inIframe, isSecure, hasMic, onReset }) {
 
 const MONO = "'Courier New', ui-monospace, monospace";
 const S = {
-  page: { minHeight: "100vh", background: "#e8e3d6", backgroundImage: "repeating-linear-gradient(0deg, rgba(0,0,0,0.015) 0 1px, transparent 1px 26px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "32px 16px", fontFamily: MONO },
-  frame: { width: "100%", maxWidth: 360 },
-  card: { background: "#fffdf7", padding: "28px 22px", boxShadow: "0 12px 40px rgba(0,0,0,0.22)", border: "1px solid #ddd6c4" },
-  center: { background: "#fffdf7", padding: "48px 24px", textAlign: "center", boxShadow: "0 12px 40px rgba(0,0,0,0.22)" },
-  armText: { fontSize: 16, color: "#111", letterSpacing: 1, textAlign: "center" },
-  brand: { textAlign: "center", fontSize: 10, letterSpacing: 4, color: "#9a9484", marginBottom: 14 },
-  title: { textAlign: "center", fontSize: 44, fontWeight: 800, letterSpacing: 2, color: "#1a1a1a", margin: "0 0 2px" },
-  subname: { textAlign: "center", fontSize: 13, letterSpacing: 4, color: "#9a9484", marginBottom: 18, textTransform: "uppercase" },
-  desc: { textAlign: "center", fontSize: 12.5, lineHeight: 1.9, color: "#555", marginBottom: 26 },
-  iframeNote: { border: "1.5px dashed #111", padding: "12px 14px", fontSize: 11.5, lineHeight: 1.7, color: "#333", marginBottom: 20, textAlign: "left" },
-  recLabel: { textAlign: "center", fontSize: 12, letterSpacing: 1, color: "#d11", fontWeight: 700, marginBottom: 12 },
-  staffWrapLive: { background: "#fffdf7", border: "1px solid #eee5cf", marginBottom: 14, maxHeight: 360, overflowY: "auto" },
-  staffWrap: { background: "#fffdf7", border: "1px solid #eee5cf", marginBottom: 4 },
+  page: { minHeight: "100vh", background: "#d8d4c8", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "28px 14px", fontFamily: SERIF },
+  frame: { width: "100%", maxWidth: 440 },
+  sheet: { background: "#fff", padding: "30px 24px 26px", boxShadow: "0 16px 50px rgba(0,0,0,0.28)" },
+  center: { background: "#fff", padding: "48px 24px", textAlign: "center", boxShadow: "0 16px 50px rgba(0,0,0,0.28)" },
+  armText: { fontSize: 16, color: "#111", letterSpacing: 1, textAlign: "center", fontFamily: SERIF },
+
+  bigTitle: { textAlign: "center", fontSize: 40, fontWeight: 400, letterSpacing: 4, color: "#111", margin: "0 0 6px", fontFamily: SERIF },
+  lyricSub: { textAlign: "center", fontSize: 12.5, color: "#222", margin: "0 0 18px", fontFamily: SERIF, lineHeight: 1.5 },
+  demoScore: { margin: "8px 0" },
+  liveScore: { margin: "4px 0 12px", maxHeight: 360, overflowY: "auto" },
+  doneScore: { margin: "8px 0", maxHeight: 380, overflowY: "auto" },
+  footerLine: { textAlign: "center", fontSize: 12, fontStyle: "italic", color: "#333", margin: "14px 0 6px", fontFamily: SERIF },
+  aakboName: { textAlign: "center", fontSize: 18, fontWeight: 700, color: "#111", margin: "2px 0 22px", fontFamily: SERIF },
+
+  iframeNote: { border: "1.5px dashed #111", padding: "12px 14px", fontSize: 11.5, lineHeight: 1.7, color: "#333", marginBottom: 18, textAlign: "left", fontFamily: MONO },
+  recLabel: { textAlign: "center", fontSize: 12, letterSpacing: 1, color: "#c0143c", fontWeight: 700, marginBottom: 10, fontFamily: SERIF },
   meterMini: { height: 6, background: "#e5e0d2", borderRadius: 3, overflow: "hidden", marginBottom: 14 },
   meterFill: { height: "100%", background: "#111", transition: "width 60ms linear" },
-  doneTitle: { textAlign: "center", fontSize: 30, fontWeight: 800, fontStyle: "italic", color: "#111", letterSpacing: 2, marginBottom: 16 },
-  playerBox: { marginTop: 14 },
+
+  playerBox: { marginTop: 16 },
   voiceRow: { display: "flex", gap: 6, marginBottom: 10 },
   voiceOn: { flex: 1, padding: "10px 4px", background: "#111", color: "#fff", border: "1.5px solid #111", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
-  voiceOff: { flex: 1, padding: "10px 4px", background: "#fffdf7", color: "#111", border: "1.5px solid #ccc", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
-  btnPlay: { width: "100%", padding: "14px", background: "#e0245e", color: "#fff", border: "none", fontSize: 15, fontWeight: 700, letterSpacing: 1, cursor: "pointer", fontFamily: MONO },
-  actions: { marginTop: 18 },
+  voiceOff: { flex: 1, padding: "10px 4px", background: "#fff", color: "#111", border: "1.5px solid #ccc", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
+  btnPlay: { width: "100%", padding: "14px", background: "#c0143c", color: "#fff", border: "none", fontSize: 15, fontWeight: 700, letterSpacing: 1, cursor: "pointer", fontFamily: MONO },
+
+  actions: { marginTop: 16 },
   actionRow: { display: "flex", gap: 10, marginTop: 10 },
-  btnMain: { width: "100%", padding: "16px", background: "#111", color: "#fff", border: "none", fontSize: 15, fontWeight: 700, letterSpacing: 1, cursor: "pointer", fontFamily: MONO },
-  btnHalf: { flex: 1, padding: "14px", background: "#fffdf7", color: "#111", border: "1.5px solid #111", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
+  btnMain: { width: "100%", padding: "16px", background: "#111", color: "#fff", border: "none", fontSize: 14.5, fontWeight: 700, letterSpacing: 1, cursor: "pointer", fontFamily: MONO },
+  btnHalf: { flex: 1, padding: "14px", background: "#fff", color: "#111", border: "1.5px solid #111", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
   btnStop: { width: "100%", padding: "16px", background: "#111", color: "#fff", border: "none", fontSize: 15, fontWeight: 700, letterSpacing: 2, cursor: "pointer", fontFamily: MONO },
-  deniedHead: { fontSize: 18, fontWeight: 800, color: "#111", letterSpacing: 1, marginBottom: 18, textAlign: "center" },
-  steps: { textAlign: "left", margin: "0 0 24px", paddingLeft: 18 },
+
+  deniedHead: { fontSize: 18, fontWeight: 700, color: "#111", letterSpacing: 1, marginBottom: 18, textAlign: "center", fontFamily: SERIF },
+  steps: { textAlign: "left", margin: "0 0 24px", paddingLeft: 18, fontFamily: MONO },
   stepItem: { fontSize: 12.5, color: "#444", lineHeight: 1.7, marginBottom: 8 },
-  diagBox: { marginTop: 22, padding: "12px 14px", background: "#f0ece0", textAlign: "left" },
+  diagBox: { marginTop: 22, padding: "12px 14px", background: "#f0ece0", textAlign: "left", fontFamily: MONO },
   diagTitle: { fontSize: 10, letterSpacing: 2, color: "#999", marginBottom: 8 },
   diagLine: { fontSize: 11, color: "#666", lineHeight: 1.6 },
-  privacy: { marginTop: 24, fontSize: 11, color: "#857f6f", textAlign: "center", letterSpacing: 0.5 },
 };
 const CSS = `
   * { box-sizing: border-box; margin: 0; }
   button:active { transform: translateY(1px); }
   button:disabled { opacity: 0.5; cursor: default; }
   .pop { animation: pop 0.4s cubic-bezier(0.16,1,0.3,1); }
-  @keyframes pop { 0% { opacity: 0; transform: translateY(-12px) scale(0.97); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+  @keyframes pop { 0% { opacity: 0; transform: translateY(-12px) scale(0.98); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-thumb { background: #ccc; }
 `;
