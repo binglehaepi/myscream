@@ -243,9 +243,9 @@ function detectPitch(buf, sampleRate) {
 function freqToMidi(f) { return Math.round(69 + 12 * Math.log2(f / 440)); }
 
 const LOW_MIDI = 57, HIGH_MIDI = 79;
+// 음높이 제한 없음 — 오선·다른 단 침범·악보 밖 위쪽 허용
 function staffY(midi, top, staffH) {
-  const c = Math.max(LOW_MIDI - 5, Math.min(HIGH_MIDI + 5, midi));
-  const r = (c - LOW_MIDI) / (HIGH_MIDI - LOW_MIDI);
+  const r = (midi - LOW_MIDI) / (HIGH_MIDI - LOW_MIDI);
   return top + staffH - r * staffH;
 }
 
@@ -515,6 +515,18 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffL
   const headH = showHeader ? 30 : 4;
   const H = noteTop + headH + totalLines * blockH;
 
+  let extMinY = noteTop;
+  let extMaxY = H;
+  layout.forEach(({ n, line }) => {
+    if (n.rest || n.midi == null) return;
+    const top = noteTop + headH + line * blockH + 8;
+    const y = staffY(n.midi, top, staffH);
+    extMinY = Math.min(extMinY, y - 30);
+    extMaxY = Math.max(extMaxY, y + 14);
+  });
+  const vbTop = Math.min(0, extMinY - 12);
+  const vbH = Math.max(H, extMaxY + 20) - vbTop;
+
   const els = [];
 
   // 빠르기말 (좌상) + 우상 지시문
@@ -571,8 +583,8 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffL
   });
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
-      <rect x="0" y="0" width={W} height={H} fill="#fff" />
+    <svg viewBox={`0 ${vbTop} ${W} ${vbH}`} style={{ width: "100%", height: "auto", display: "block", overflow: "visible" }}>
+      <rect x="0" y={vbTop} width={W} height={vbH} fill="#fff" />
       {els}
     </svg>
   );
@@ -591,12 +603,24 @@ function drawScoreSheet({ notes, meta, onBlob }) {
   const totalLines = Math.max(1, (layout.length ? layout[layout.length - 1].line + 1 : 1));
   const titleH = 230;
   const scoreTop = titleH;
-  const H = scoreTop + totalLines * blockH + 150;
+  let extMinY = scoreTop;
+  let extMaxY = scoreTop + totalLines * blockH;
+  layout.forEach(({ n, line }) => {
+    if (n.rest || n.midi == null) return;
+    const top = scoreTop + line * blockH + 10;
+    const y = staffYC(n.midi, top, staffH);
+    extMinY = Math.min(extMinY, y - 34);
+    extMaxY = Math.max(extMaxY, y + 16);
+  });
+  const topPad = extMinY < scoreTop ? Math.ceil(scoreTop - extMinY + 18) : 0;
+  const botPad = Math.max(0, Math.ceil(extMaxY - (scoreTop + totalLines * blockH) + 28));
+  const H = scoreTop + totalLines * blockH + 150 + topPad + botPad;
 
   const canvas = document.createElement("canvas");
   canvas.width = W * dpr; canvas.height = H * dpr;
   const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
+  ctx.translate(0, topPad);
+  ctx.fillStyle = "#ffffff"; ctx.fillRect(0, -topPad, W, H);
   const cx = W / 2;
 
   // 제목
@@ -633,7 +657,7 @@ function drawScoreSheet({ notes, meta, onBlob }) {
     }
   }
 
-  layout.forEach(({ n, x, w, line }) => {
+  layout.forEach(({ n, i, x, w, line }) => {
     const top = scoreTop + line * blockH + 10;
     if (n.rest) {
       ctx.fillStyle = "#111"; ctx.fillRect(x - 7, top + gap - 3, 14, 4);
@@ -672,9 +696,7 @@ function drawScoreSheet({ notes, meta, onBlob }) {
   canvas.toBlob((blob) => onBlob(blob), "image/png");
 }
 function staffYC(midi, top, staffH) {
-  const c = Math.max(LOW_MIDI - 5, Math.min(HIGH_MIDI + 5, midi));
-  const r = (c - LOW_MIDI) / (HIGH_MIDI - LOW_MIDI);
-  return top + staffH - r * staffH;
+  return staffY(midi, top, staffH);
 }
 
 function IdleView({ onStart, inIframe }) {
@@ -770,8 +792,8 @@ const S = {
   lyricSub: { textAlign: "center", fontSize: 12, color: "#444", margin: "0 0 12px", letterSpacing: 2, fontFamily: SERIF },
   brandTitleSmall: { textAlign: "center", fontSize: 22, fontWeight: 400, letterSpacing: 4, color: "#111", margin: "0 0 8px", fontFamily: SERIF },
   scoreStage: { margin: "0 0 18px", background: "#fff" },
-  liveScore: { margin: "0 0 12px", maxHeight: 420, overflowY: "auto", background: "#fff" },
-  doneScore: { margin: "0 0 8px", maxHeight: 420, overflowY: "auto", background: "#fff" },
+  liveScore: { margin: "0 0 12px", maxHeight: 420, overflowY: "auto", overflowX: "hidden", background: "#fff" },
+  doneScore: { margin: "0 0 8px", maxHeight: 420, overflowY: "auto", overflowX: "hidden", background: "#fff" },
   footerLine: { textAlign: "center", fontSize: 12, fontStyle: "italic", color: "#333", margin: "14px 0 6px", fontFamily: SERIF },
 
   iframeNote: { border: "1.5px dashed #111", padding: "12px 14px", fontSize: 11.5, lineHeight: 1.7, color: "#333", marginBottom: 18, textAlign: "left", fontFamily: MONO },
