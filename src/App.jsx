@@ -53,68 +53,156 @@ function dynamicFor(norm) {
   return "pp";
 }
 
-// ── 재생 엔진 ──
+// ── 재생 엔진 (채보 길이에 맞춰 연속 재생) ──
+function playbackDur(n) {
+  const base = n.dur || 0.4;
+  const ext = n.fermata ? base * 0.35 : 0;
+  return Math.max(0.12, Math.min(6.5, base + ext));
+}
+
 class ScorePlayer {
-  constructor() { this.ctx = null; this.master = null; this.timers = []; this.playing = false; }
+  constructor() { this.ctx = null; this.master = null; this.timers = []; this.nodes = []; this.playing = false; }
   ensureCtx() {
     if (!this.ctx || this.ctx.state === "closed") {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      this.master = this.ctx.createGain(); this.master.gain.value = 0.9; this.master.connect(this.ctx.destination);
+      this.master = this.ctx.createGain(); this.master.gain.value = 1; this.master.connect(this.ctx.destination);
     }
     if (this.ctx.state === "suspended") this.ctx.resume();
   }
-  stop() { this.timers.forEach((t) => clearTimeout(t)); this.timers = []; this.playing = false; }
-  playNote(freq, start, dur, norm, voice, glide) {
-    const ctx = this.ctx; const t = start; const vol = 0.1 + norm * 0.3;
-    if (voice === "piano") {
-      const partials = [1, 2, 3]; const gains = [1, 0.4, 0.18];
-      const g = ctx.createGain(); g.connect(this.master);
-      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.006);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + dur * 1.5);
-      partials.forEach((p, i) => {
-        const o = ctx.createOscillator(); o.type = "triangle"; o.frequency.value = freq * p;
-        const pg = ctx.createGain(); pg.gain.value = gains[i]; o.connect(pg); pg.connect(g);
-        o.start(t); o.stop(t + dur * 1.6);
-      });
-    } else if (voice === "synth") {
-      const g = ctx.createGain(); g.connect(this.master);
-      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.008);
-      g.gain.setValueAtTime(vol, t + dur * 0.7); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-      [0, 8].forEach((det) => {
-        const o = ctx.createOscillator(); o.type = "square"; o.frequency.value = freq; o.detune.value = det;
-        o.connect(g); o.start(t); o.stop(t + dur + 0.02);
-      });
+  stop() {
+    this.timers.forEach((t) => clearTimeout(t));
+    this.timers = [];
+    this.nodes.forEach(({ node, end }) => {
+      try { node.stop(end); } catch (_) {}
+      try { node.disconnect(); } catch (_) {}
+    });
+    this.nodes = [];
+    this.playing = false;
+  }
+  track(node, end) { this.nodes.push({ node, end }); return node; }
+  scheduleEnvelope(gain, t, dur, vol) {
+    const eps = 0.001;
+    const peak = Math.max(eps, vol);
+    const sustained = dur >= 0.55;
+    const attack = sustained ? Math.min(0.08, dur * 0.12) : 0.015;
+    const release = sustained ? Math.max(0.14, Math.min(0.5, dur * 0.15)) : Math.max(0.06, dur * 0.35);
+    const sustainEnd = Math.max(t + attack + 0.01, t + dur - release);
+    const end = t + dur + 0.04;
+    gain.gain.setValueAtTime(eps, t);
+    gain.gain.exponentialRampToValueAtTime(peak, t + attack);
+    if (sustained) {
+      gain.gain.setValueAtTime(peak, sustainEnd);
+      gain.gain.exponentialRampToValueAtTime(eps, end);
     } else {
-      const src = ctx.createOscillator(); src.type = "sawtooth"; src.frequency.value = freq;
-      if (glide) src.frequency.linearRampToValueAtTime(freq * glide, t + dur);
+      gain.gain.exponentialRampToValueAtTime(eps, t + dur * 0.75 + 0.04);
+    }
+    return end;
+  }
+  playNote(freq, start, dur, norm, voice, glide) {
+    const ctx = this.ctx;
+    const t = start;
+    const vol = Math.min(0.9, 0.28 + norm * 0.55);
+    const end = t + dur + 0.08;
+    const sustained = dur >= 0.55;
+    const glideRatio = glide || 1;
+
+    if (voice === "piano") {
+      const partials = [1, 2, 3, 4];
+      const gains = sustained ? [1, 0.55, 0.32, 0.14] : [1, 0.45, 0.22, 0.1];
       const g = ctx.createGain();
-      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.04);
-      g.gain.setValueAtTime(vol, t + dur * 0.6); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-      const f1 = ctx.createBiquadFilter(); f1.type = "bandpass"; f1.frequency.value = 800; f1.Q.value = 8;
-      const f2 = ctx.createBiquadFilter(); f2.type = "bandpass"; f2.frequency.value = 1200; f2.Q.value = 10;
-      const mix = ctx.createGain(); src.connect(f1); src.connect(f2); f1.connect(mix); f2.connect(mix);
-      const lfo = ctx.createOscillator(); lfo.frequency.value = 5.5;
-      const lfoG = ctx.createGain(); lfoG.gain.value = freq * 0.012; lfo.connect(lfoG); lfoG.connect(src.frequency);
-      mix.connect(g); g.connect(this.master);
-      src.start(t); src.stop(t + dur + 0.05); lfo.start(t); lfo.stop(t + dur + 0.05);
+      g.connect(this.master);
+      this.scheduleEnvelope(g, t, dur, vol);
+      partials.forEach((p, i) => {
+        const o = ctx.createOscillator();
+        o.type = sustained ? "sine" : "triangle";
+        o.frequency.setValueAtTime(freq * p, t);
+        if (glide && p === 1) o.frequency.exponentialRampToValueAtTime(freq * p * glideRatio, t + dur);
+        const pg = ctx.createGain();
+        pg.gain.value = gains[i];
+        o.connect(pg);
+        pg.connect(g);
+        o.start(t);
+        this.track(o, end);
+      });
+      this.track(g, end);
+    } else if (voice === "synth") {
+      const g = ctx.createGain();
+      g.connect(this.master);
+      this.scheduleEnvelope(g, t, dur, vol * 0.92);
+      [0, 7, -7].forEach((det) => {
+        const o = ctx.createOscillator();
+        o.type = "square";
+        o.frequency.setValueAtTime(freq, t);
+        o.detune.value = det;
+        if (glide) o.frequency.exponentialRampToValueAtTime(freq * glideRatio, t + dur);
+        o.connect(g);
+        o.start(t);
+        this.track(o, end);
+      });
+      this.track(g, end);
+    } else {
+      const src = ctx.createOscillator();
+      src.type = "sawtooth";
+      src.frequency.setValueAtTime(freq, t);
+      if (glide) src.frequency.exponentialRampToValueAtTime(freq * glideRatio, t + dur);
+      const f1 = ctx.createBiquadFilter();
+      f1.type = "bandpass";
+      f1.frequency.value = 720 + norm * 380;
+      f1.Q.value = sustained ? 5.5 : 8;
+      const f2 = ctx.createBiquadFilter();
+      f2.type = "bandpass";
+      f2.frequency.value = 1080 + norm * 520;
+      f2.Q.value = sustained ? 6 : 10;
+      const mix = ctx.createGain();
+      mix.gain.value = 1.15;
+      const g = ctx.createGain();
+      g.connect(this.master);
+      this.scheduleEnvelope(g, t, dur, vol);
+      src.connect(f1);
+      src.connect(f2);
+      f1.connect(mix);
+      f2.connect(mix);
+      mix.connect(g);
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = sustained ? 4.2 : 5.5;
+      const lfoG = ctx.createGain();
+      lfoG.gain.value = freq * (sustained ? 0.008 : 0.014);
+      lfo.connect(lfoG);
+      lfoG.connect(src.frequency);
+      src.start(t);
+      lfo.start(t);
+      this.track(src, end);
+      this.track(lfo, end);
+      this.track(g, end);
     }
   }
   play(notes, voice, onStep, onEnd) {
-    this.ensureCtx(); this.stop(); this.playing = true;
-    const ctx = this.ctx; const baseStep = 0.16;
-    let cursor = ctx.currentTime + 0.05; let elapsedMs = 50;
+    this.ensureCtx();
+    this.stop();
+    this.playing = true;
+    const ctx = this.ctx;
+    const gap = 0.05;
+    let cursor = ctx.currentTime + 0.05;
+    let elapsedMs = 50;
     notes.forEach((n, i) => {
-      const noteDur = Math.max(0.12, Math.min(0.9, n.dur));
+      const noteDur = playbackDur(n);
       if (n.midi != null) {
-        const glide = n.gliss ? (n.glissTo ? midiToFreq(n.glissTo) / midiToFreq(n.midi) : 1.5) : null;
+        const glide = n.gliss
+          ? (n.glissTo != null ? midiToFreq(n.glissTo) / midiToFreq(n.midi) : 1.35)
+          : null;
         this.playNote(midiToFreq(n.midi), cursor, noteDur, n.norm, voice, glide);
       }
       const ms = elapsedMs;
       this.timers.push(setTimeout(() => { if (this.playing) onStep && onStep(i); }, ms));
-      const advance = (n.midi != null ? noteDur : 0.12) + baseStep * 0.3;
-      cursor += advance; elapsedMs += advance * 1000;
+      const advance = n.midi != null ? noteDur + gap : 0.1;
+      cursor += advance;
+      elapsedMs += advance * 1000;
     });
-    this.timers.push(setTimeout(() => { this.playing = false; onStep && onStep(-1); onEnd && onEnd(); }, elapsedMs + 150));
+    this.timers.push(setTimeout(() => {
+      this.playing = false;
+      onStep && onStep(-1);
+      onEnd && onEnd();
+    }, elapsedMs + 200));
   }
 }
 
