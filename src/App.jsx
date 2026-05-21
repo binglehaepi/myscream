@@ -12,6 +12,129 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 // 음표 하나가 담는 정보: { midi, norm(음량), t }
 // midi: 음 높이(MIDI note number). null이면 무음(쉼표 취급)
 
+function midiToFreq(m) {
+  return 440 * Math.pow(2, (m - 69) / 12);
+}
+
+// ── 재생 엔진: 음표 배열을 순차 재생. 음색 3종 ──
+// voice: "piano" | "synth" | "ahh"
+// 각 음표 하나당 한 노트. 진행 콜백으로 현재 재생 인덱스 표시.
+class ScorePlayer {
+  constructor() {
+    this.ctx = null;
+    this.master = null;
+    this.timers = [];
+    this.playing = false;
+  }
+  ensureCtx() {
+    if (!this.ctx || this.ctx.state === "closed") {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.9;
+      this.master.connect(this.ctx.destination);
+    }
+    if (this.ctx.state === "suspended") this.ctx.resume();
+  }
+  stop() {
+    this.timers.forEach((t) => clearTimeout(t));
+    this.timers = [];
+    this.playing = false;
+  }
+  // 한 음 발음
+  playNote(freq, start, dur, norm, voice) {
+    const ctx = this.ctx;
+    const t = start;
+    const vol = 0.12 + norm * 0.25;
+
+    if (voice === "piano") {
+      // 배음 몇 개 쌓고 빠른 어택 + 지수 감쇠 → 피아노 비슷
+      const partials = [1, 2, 3];
+      const gains = [1, 0.4, 0.18];
+      const g = ctx.createGain();
+      g.connect(this.master);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(vol, t + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur * 1.6);
+      partials.forEach((p, i) => {
+        const o = ctx.createOscillator();
+        o.type = "triangle";
+        o.frequency.value = freq * p;
+        const pg = ctx.createGain();
+        pg.gain.value = gains[i];
+        o.connect(pg); pg.connect(g);
+        o.start(t); o.stop(t + dur * 1.7);
+      });
+    } else if (voice === "synth") {
+      // 8비트 사각파 + 살짝 디튠
+      const g = ctx.createGain();
+      g.connect(this.master);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(vol, t + 0.01);
+      g.gain.setValueAtTime(vol, t + dur * 0.7);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      [0, 8].forEach((det) => {
+        const o = ctx.createOscillator();
+        o.type = "square";
+        o.frequency.value = freq;
+        o.detune.value = det;
+        o.connect(g);
+        o.start(t); o.stop(t + dur + 0.02);
+      });
+    } else {
+      // "아~" 보컬: 톱니파 + 포먼트 밴드패스 2개로 모음 'a' 흉내
+      const src = ctx.createOscillator();
+      src.type = "sawtooth";
+      src.frequency.value = freq;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(vol, t + 0.05);
+      g.gain.setValueAtTime(vol, t + dur * 0.6);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      // 모음 'a' 포먼트: ~800Hz, ~1200Hz
+      const f1 = ctx.createBiquadFilter();
+      f1.type = "bandpass"; f1.frequency.value = 800; f1.Q.value = 8;
+      const f2 = ctx.createBiquadFilter();
+      f2.type = "bandpass"; f2.frequency.value = 1200; f2.Q.value = 10;
+      const mix = ctx.createGain();
+      src.connect(f1); src.connect(f2);
+      f1.connect(mix); f2.connect(mix);
+      // 살짝 비브라토
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 5.5;
+      const lfoG = ctx.createGain();
+      lfoG.gain.value = freq * 0.01;
+      lfo.connect(lfoG); lfoG.connect(src.frequency);
+      mix.connect(g); g.connect(this.master);
+      src.start(t); src.stop(t + dur + 0.05);
+      lfo.start(t); lfo.stop(t + dur + 0.05);
+    }
+  }
+  // notes 재생. onStep(i), onEnd 콜백.
+  play(notes, voice, onStep, onEnd) {
+    this.ensureCtx();
+    this.stop();
+    this.playing = true;
+    const ctx = this.ctx;
+    const step = 0.22; // 음표 간 간격(초)
+    const noteDur = 0.32;
+    let scheduled = 0;
+    notes.forEach((n, i) => {
+      const at = ctx.currentTime + 0.06 + i * step;
+      if (n.midi != null) {
+        this.playNote(midiToFreq(n.midi), at, noteDur, n.norm, voice);
+      }
+      const ms = (0.06 + i * step) * 1000;
+      this.timers.push(setTimeout(() => { if (this.playing) onStep && onStep(i); }, ms));
+      scheduled = ms;
+    });
+    this.timers.push(setTimeout(() => {
+      this.playing = false;
+      onStep && onStep(-1);
+      onEnd && onEnd();
+    }, scheduled + step * 1000 + 200));
+  }
+}
+
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 function midiToName(m) {
@@ -76,6 +199,9 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [diag, setDiag] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [voice, setVoice] = useState("piano"); // piano | synth | ahh
+  const [playing, setPlaying] = useState(false);
+  const [playIdx, setPlayIdx] = useState(-1); // 재생 중 강조할 음표 인덱스
 
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
@@ -83,6 +209,7 @@ export default function App() {
   const rafRef = useRef(null);
   const bufRef = useRef(null);
   const timeBufRef = useRef(null);
+  const playerRef = useRef(null);
 
   const peakRef = useRef(0);
   const startRef = useRef(0);
@@ -207,15 +334,17 @@ export default function App() {
   }, [cleanup]);
 
   const reset = useCallback(() => {
+    if (playerRef.current) playerRef.current.stop();
+    setPlaying(false); setPlayIdx(-1);
     notesRef.current = []; setNotes([]); setLevel(0); setCurMidi(null); setElapsed(0); setResult(null); setPhase("idle");
   }, []);
 
-  // png 저장: 캔버스에 오선지+음표 다시 그림
+  // png 저장: 오선지+음표만 (스코어/등급 정보 없이 깔끔하게)
   const saveImage = useCallback(() => {
     if (!result) return;
     setSaving(true);
     try {
-      drawScore({ notes: notesRef.current, result, toBlob: true, onBlob: (blob) => {
+      drawStaffOnly({ notes: notesRef.current, onBlob: (blob) => {
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         const d = result.ts;
@@ -227,6 +356,35 @@ export default function App() {
       }});
     } catch (e) { setSaving(false); alert("이미지 저장에 실패했어요."); }
   }, [result]);
+
+  // 재생 / 정지
+  const togglePlay = useCallback(() => {
+    if (!playerRef.current) playerRef.current = new ScorePlayer();
+    const p = playerRef.current;
+    if (playing) {
+      p.stop();
+      setPlaying(false);
+      setPlayIdx(-1);
+      return;
+    }
+    setPlaying(true);
+    p.play(
+      notesRef.current,
+      voice,
+      (i) => setPlayIdx(i),
+      () => { setPlaying(false); setPlayIdx(-1); }
+    );
+  }, [playing, voice]);
+
+  // 음색 바꾸면 재생 중지 (다음 재생 때 새 음색 적용)
+  const changeVoice = useCallback((v) => {
+    if (playerRef.current) playerRef.current.stop();
+    setPlaying(false);
+    setPlayIdx(-1);
+    setVoice(v);
+  }, []);
+
+  useEffect(() => () => { if (playerRef.current) playerRef.current.stop(); }, []);
 
   const copyLink = useCallback(async () => {
     try { await navigator.clipboard.writeText(window.location.href); alert("링크 복사 완료! 트위터에 자랑하세요 🎼"); }
@@ -241,7 +399,7 @@ export default function App() {
         {phase === "arming" && <div style={S.center}><p style={S.armText}>마이크 권한 허용해줘…</p></div>}
         {phase === "denied" && <DeniedView diag={diag} inIframe={inIframe} isSecure={isSecure} hasMic={hasMic} onReset={reset} />}
         {phase === "recording" && <RecordView notes={notes} level={level} curMidi={curMidi} elapsed={elapsed} onStop={stop} />}
-        {phase === "done" && result && <DoneView notes={notes} r={result} onReset={reset} onSave={saveImage} onCopy={copyLink} saving={saving} />}
+        {phase === "done" && result && <DoneView notes={notes} r={result} onReset={reset} onSave={saveImage} onCopy={copyLink} saving={saving} voice={voice} onVoice={changeVoice} playing={playing} playIdx={playIdx} onTogglePlay={togglePlay} />}
       </div>
       <p style={S.privacy}>🔒 소리는 녹음되지 않아요. 음정·음량만 분석하고 바로 사라집니다.</p>
     </div>
@@ -297,37 +455,26 @@ function LiveStaff({ notes, curMidi }) {
   );
 }
 
-// 저장용 캔버스 그리기 — 음표 전체를 여러 단으로 접어서 그림
-function drawScore({ notes, result, onBlob }) {
+// 저장용 캔버스 그리기 — 오선지 + 음표만 (정보/등급 없이 깔끔하게)
+function drawStaffOnly({ notes, onBlob }) {
   const W = 800, PAD = 50;
   const dpr = 2;
-  const top0 = 130;
+  const top0 = 60;
   const staffH = 120, lineGap = staffH / 4;
   const noteSpacing = 16;
   const perLine = Math.floor((W - PAD * 2 - 20) / noteSpacing);
-  const lineBlockH = staffH + 70; // 한 단 높이(여백 포함)
+  const lineBlockH = staffH + 70;
   const totalLines = Math.max(1, Math.ceil(notes.length / perLine));
 
-  const footerH = 260;
-  const H = top0 + totalLines * lineBlockH + footerH;
+  const H = top0 + totalLines * lineBlockH + 40;
 
   const canvas = document.createElement("canvas");
   canvas.width = W * dpr; canvas.height = H * dpr;
   const ctx = canvas.getContext("2d");
   ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#fffdf7"; // 살짝 크림색 종이
+  ctx.fillStyle = "#fffdf7";
   ctx.fillRect(0, 0, W, H);
 
-  const cx = W / 2;
-  ctx.textAlign = "center";
-  ctx.fillStyle = "#999";
-  ctx.font = "12px 'Courier New', monospace";
-  ctx.fillText("S C R E A M   S C O R E", cx, 50);
-  ctx.fillStyle = "#111";
-  ctx.font = "800 26px 'Courier New', monospace";
-  ctx.fillText("나의 비명 채보", cx, 88);
-
-  // 각 단 그리기
   for (let li = 0; li < totalLines; li++) {
     const top = top0 + li * lineBlockH;
     ctx.strokeStyle = "#111"; ctx.lineWidth = 1;
@@ -342,7 +489,7 @@ function drawScore({ notes, result, onBlob }) {
       const x = PAD + 24 + i * noteSpacing;
       if (n.midi == null) {
         ctx.fillStyle = "#ccc"; ctx.font = "16px serif"; ctx.textAlign = "center";
-        ctx.fillText("𝄽", x, top + staffH / 2 + 5);
+        ctx.fillText("\uD834\uDD3D", x, top + staffH / 2 + 5);
         return;
       }
       const y = noteYCanvas(n.midi, top, staffH);
@@ -356,36 +503,6 @@ function drawScore({ notes, result, onBlob }) {
       ctx.beginPath(); ctx.moveTo(x + rad, y); ctx.lineTo(x + rad, y - 26); ctx.stroke();
     });
   }
-
-  // footer 정보
-  let fy = top0 + totalLines * lineBlockH + 30;
-  const d = result.ts;
-  const dateStr = `${d.getFullYear()}.${pad(d.getMonth()+1)}.${pad(d.getDate())}`;
-  ctx.strokeStyle = "#ccc"; ctx.lineWidth = 1.5; ctx.setLineDash([6,5]);
-  ctx.beginPath(); ctx.moveTo(PAD, fy); ctx.lineTo(W-PAD, fy); ctx.stroke(); ctx.setLineDash([]);
-  fy += 36;
-
-  const row = (k, v) => {
-    ctx.font = "700 16px 'Courier New', monospace";
-    ctx.textAlign = "left"; ctx.fillStyle = "#444"; ctx.fillText(k, PAD, fy);
-    ctx.textAlign = "right"; ctx.fillStyle = "#111"; ctx.fillText(v, W - PAD, fy);
-    fy += 32;
-  };
-  row("일자", `${dateStr}  No.${result.no}`);
-  row("음표 수", `${result.count} 개`);
-  row("최고음 / 최저음", `${midiToName(result.highest)} / ${midiToName(result.lowest)}`);
-  row("음역대", `${result.range} 반음`);
-  row("지속 시간", `${result.dur.toFixed(1)} s`);
-  fy += 10;
-
-  // 등급 박스
-  ctx.strokeStyle = "#111"; ctx.lineWidth = 2.5;
-  ctx.strokeRect(PAD, fy, W - PAD*2, 80);
-  ctx.textAlign = "center";
-  ctx.fillStyle = "#111"; ctx.font = "800 28px 'Courier New', monospace";
-  ctx.fillText(result.grade.label, cx, fy + 38);
-  ctx.fillStyle = "#666"; ctx.font = "italic 14px 'Courier New', monospace";
-  ctx.fillText(`“${result.grade.note}”`, cx, fy + 64);
 
   canvas.toBlob((blob) => onBlob(blob), "image/png");
 }
@@ -427,7 +544,7 @@ function RecordView({ notes, level, curMidi, elapsed, onStop }) {
   );
 }
 
-function DoneView({ notes, r, onReset, onSave, onCopy, saving }) {
+function DoneView({ notes, r, onReset, onSave, onCopy, saving, voice, onVoice, playing, playIdx, onTogglePlay }) {
   // 화면용: 단을 접어서 SVG로 미리보기
   const W = 320, PAD = 16, top = 26, staffH = 100, lineGap = staffH / 4;
   const noteSpacing = 9;
@@ -453,14 +570,17 @@ function DoneView({ notes, r, onReset, onSave, onCopy, saving }) {
                   ))}
                   <line x1={PAD+2} y1={t} x2={PAD+2} y2={t+staffH} stroke="#111" strokeWidth="1.5" />
                   {slice.map((n, i) => {
+                    const globalIdx = li * perLine + i;
+                    const isPlaying = globalIdx === playIdx;
                     const x = PAD + 14 + i * noteSpacing;
                     if (n.midi == null) return <text key={i} x={x} y={t+staffH/2+3} fontSize="9" fill="#ccc" textAnchor="middle">𝄽</text>;
                     const y = noteY(n.midi, t, staffH);
                     const rad = 2 + n.norm * 4;
+                    const col = isPlaying ? "#e0245e" : "#111";
                     return (
                       <g key={i}>
-                        <ellipse cx={x} cy={y} rx={rad*1.2} ry={rad} fill="#111" transform={`rotate(-20 ${x} ${y})`} />
-                        <line x1={x+rad} y1={y} x2={x+rad} y2={y-18} stroke="#111" strokeWidth="1.2" />
+                        <ellipse cx={x} cy={y} rx={(rad*1.2) * (isPlaying ? 1.6 : 1)} ry={rad * (isPlaying ? 1.6 : 1)} fill={col} transform={`rotate(-20 ${x} ${y})`} />
+                        <line x1={x+rad} y1={y} x2={x+rad} y2={y-18} stroke={col} strokeWidth="1.2" />
                       </g>
                     );
                   })}
@@ -468,6 +588,17 @@ function DoneView({ notes, r, onReset, onSave, onCopy, saving }) {
               );
             })}
           </svg>
+        </div>
+
+        <div style={S.playerBox}>
+          <div style={S.voiceRow}>
+            <button style={voice === "piano" ? S.voiceOn : S.voiceOff} onClick={() => onVoice("piano")}>🎹 피아노</button>
+            <button style={voice === "synth" ? S.voiceOn : S.voiceOff} onClick={() => onVoice("synth")}>👾 전자음</button>
+            <button style={voice === "ahh" ? S.voiceOn : S.voiceOff} onClick={() => onVoice("ahh")}>🗣️ 아~</button>
+          </div>
+          <button style={S.btnPlay} onClick={onTogglePlay}>
+            {playing ? "■ 정지" : "▶︎ 내 비명 연주하기"}
+          </button>
         </div>
 
         <div style={S.dash} />
@@ -483,7 +614,7 @@ function DoneView({ notes, r, onReset, onSave, onCopy, saving }) {
       </div>
 
       <div style={S.actions}>
-        <button style={S.btnMain} onClick={onSave} disabled={saving}>{saving ? "저장 중…" : "🎼 악보 이미지 저장"}</button>
+        <button style={S.btnMain} onClick={onSave} disabled={saving}>{saving ? "저장 중…" : "🎼 오선지 이미지 저장"}</button>
         <div style={S.actionRow}>
           <button style={S.btnHalf} onClick={onCopy}>🔗 링크 복사</button>
           <button style={S.btnHalf} onClick={onReset}>다시 지르기</button>
@@ -555,6 +686,12 @@ const S = {
   gradeBox: { border: "2px solid #111", padding: "16px 12px", textAlign: "center", margin: "8px 0 0" },
   gradeLabel: { fontSize: 24, fontWeight: 800, color: "#111", letterSpacing: 2, marginBottom: 8 },
   gradeNote: { fontSize: 12, color: "#666", fontStyle: "italic" },
+
+  playerBox: { marginTop: 14, padding: "14px 0 0" },
+  voiceRow: { display: "flex", gap: 6, marginBottom: 10 },
+  voiceOn: { flex: 1, padding: "10px 4px", background: "#111", color: "#fff", border: "1.5px solid #111", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
+  voiceOff: { flex: 1, padding: "10px 4px", background: "#fffdf7", color: "#111", border: "1.5px solid #ccc", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
+  btnPlay: { width: "100%", padding: "14px", background: "#e0245e", color: "#fff", border: "none", fontSize: 15, fontWeight: 700, letterSpacing: 1, cursor: "pointer", fontFamily: MONO },
 
   actions: { marginTop: 20 },
   actionRow: { display: "flex", gap: 10, marginTop: 10 },
