@@ -20,27 +20,10 @@ const DYN_NOTES = { ffff: "release everything", fff: "screamed, not sung", ff: "
 const TEMPI = ["Molto drammatico", "Disperato", "Con tutta forza", "Largo doloroso", "Agitato assai"];
 const FOOTERS = ["for one scream and breath", "to be performed only once", "in a single exhalation", "as loud as the body permits"];
 
-// 가사: 길이→'아' 개수, 음량→받침(ㄱ/k)
-function lyricFor(durSec, norm) {
-  const useRoman = Math.random() < 0.35;
-  const aCount = Math.max(2, Math.round(durSec * 7) + Math.round(norm * 4));
-  const a = useRoman ? "a" : "아";
-  const kChar = useRoman ? "k" : "ㄱ";
-  const kStrength = norm > 0.75 ? 3 : norm > 0.55 ? 2 : norm > 0.3 ? 1 : 0;
-  let s;
-  if (kStrength === 0) { s = a.repeat(aCount); if (durSec > 0.8) s += "~"; }
-  else if (kStrength === 1) { s = a.repeat(aCount) + (useRoman ? "k" : "악"); }
-  else {
-    const parts = []; let remain = aCount;
-    while (remain > 0) {
-      const chunk = Math.min(remain, 2 + Math.floor(Math.random() * 4));
-      parts.push(a.repeat(chunk)); remain -= chunk;
-      if (remain > 0 && Math.random() < 0.5) parts.push(kChar);
-    }
-    s = parts.join(useRoman ? " " : ""); s += useRoman ? "k" : "악";
-  }
-  if (durSec > 1.0 && Math.random() < 0.5) { const mid = Math.floor(s.length / 2); s = s.slice(0, mid) + " - " + s.slice(mid); }
-  return s;
+const UNIFIED_LYRIC = "a a a a - a";
+
+function lyricFor() {
+  return UNIFIED_LYRIC;
 }
 
 function dynamicFor(norm) {
@@ -56,8 +39,8 @@ function dynamicFor(norm) {
 // ── 재생 엔진 (녹음 시각·박자·피치 반영) ──
 function playbackToneDur(n, gapToNext) {
   const span = n.span || n.dur || NOTE_BEAD_DUR;
-  if (gapToNext != null) return Math.max(0.05, Math.min(gapToNext * 0.9, span * 1.15));
-  return Math.max(0.05, Math.min(0.5, span * 1.1));
+  if (gapToNext != null) return Math.max(0.08, gapToNext * 0.98 + 0.03);
+  return Math.max(0.1, span * 1.25);
 }
 
 class ScorePlayer {
@@ -80,9 +63,19 @@ class ScorePlayer {
     this.playing = false;
   }
   track(node, end) { this.nodes.push({ node, end }); return node; }
-  scheduleEnvelope(gain, t, dur, vol) {
+  scheduleEnvelope(gain, t, dur, vol, legato = false) {
     const eps = 0.001;
     const peak = Math.max(eps, vol);
+    if (legato) {
+      const attack = 0.005;
+      const release = Math.min(0.03, dur * 0.1);
+      const sustainEnd = Math.max(t + attack, t + dur - release);
+      gain.gain.setValueAtTime(eps, t);
+      gain.gain.exponentialRampToValueAtTime(peak, t + attack);
+      gain.gain.setValueAtTime(peak * 0.94, sustainEnd);
+      gain.gain.exponentialRampToValueAtTime(eps, t + dur + 0.015);
+      return t + dur + 0.02;
+    }
     const sustained = dur >= 0.55;
     const attack = sustained ? Math.min(0.08, dur * 0.12) : 0.015;
     const release = sustained ? Math.max(0.14, Math.min(0.5, dur * 0.15)) : Math.max(0.06, dur * 0.35);
@@ -98,21 +91,21 @@ class ScorePlayer {
     }
     return end;
   }
-  playNote(freq, start, dur, norm, voice, glide, detune = 0) {
+  playNote(freq, start, dur, norm, voice, glide, detune = 0, legato = true) {
     const ctx = this.ctx;
     const t = start;
     const vol = Math.min(0.95, 0.2 + norm * 0.65);
     const end = t + dur + 0.08;
     const sustained = dur >= 0.4;
     const glideRatio = glide || 1;
-    const glideT = Math.min(dur * 0.7, 0.12);
+    const glideT = legato ? Math.min(dur * 0.85, Math.max(0.06, dur * 0.5)) : Math.min(dur * 0.7, 0.12);
 
     if (voice === "piano") {
       const partials = [1, 2, 3, 4];
       const gains = sustained ? [1, 0.55, 0.32, 0.14] : [1, 0.45, 0.22, 0.1];
       const g = ctx.createGain();
       g.connect(this.master);
-      this.scheduleEnvelope(g, t, dur, vol);
+      this.scheduleEnvelope(g, t, dur, vol, legato);
       partials.forEach((p, i) => {
         const o = ctx.createOscillator();
         o.type = sustained ? "sine" : "triangle";
@@ -130,7 +123,7 @@ class ScorePlayer {
     } else if (voice === "synth") {
       const g = ctx.createGain();
       g.connect(this.master);
-      this.scheduleEnvelope(g, t, dur, vol * 0.92);
+      this.scheduleEnvelope(g, t, dur, vol * 0.92, legato);
       [0, 7, -7].forEach((det) => {
         const o = ctx.createOscillator();
         o.type = "square";
@@ -160,7 +153,7 @@ class ScorePlayer {
       mix.gain.value = 1.15;
       const g = ctx.createGain();
       g.connect(this.master);
-      this.scheduleEnvelope(g, t, dur, vol);
+      this.scheduleEnvelope(g, t, dur, vol, legato);
       src.connect(f1);
       src.connect(f2);
       f1.connect(mix);
@@ -204,15 +197,17 @@ class ScorePlayer {
       const nextT = next ? (next.n.at != null ? next.n.at : t0 + (n.span || NOTE_BEAD_DUR)) : null;
       const gapToNext = nextT != null ? Math.max(0.04, nextT - t0) : null;
       tFallback = nextT ?? t0 + (n.span || NOTE_BEAD_DUR);
+      const legato = gapToNext == null || gapToNext < 0.42;
       const toneDur = playbackToneDur(n, gapToNext);
       const start = base + t0;
       totalSec = Math.max(totalSec, t0 + toneDur);
       let glide = null;
-      if (lastMidi != null && lastMidi !== n.midi) {
-        glide = midiToFreq(n.midi) / midiToFreq(lastMidi);
+      if (lastMidi != null) {
+        const ratio = midiToFreq(n.midi) / midiToFreq(lastMidi);
+        if (lastMidi !== n.midi || Math.abs(ratio - 1) > 0.02) glide = ratio;
       }
       const detune = n.detune ?? 0;
-      this.playNote(midiToFreq(n.midi), start, toneDur, n.norm ?? 0.5, voice, glide, detune);
+      this.playNote(midiToFreq(n.midi), start, toneDur, n.norm ?? 0.5, voice, glide, detune, legato);
       lastMidi = n.midi;
       this.timers.push(setTimeout(() => { if (this.playing) onStep && onStep(i); }, t0 * 1000 + 30));
     });
@@ -279,7 +274,7 @@ function buildFinalNote(cur, dur = NOTE_BEAD_DUR) {
     at,
     detune: centsBetween(cur.lastFreq, midi),
     dyn: dynamicFor(cur.peakNorm),
-    lyric: lyricFor(dur, cur.peakNorm),
+    lyric: lyricFor(),
     expr: Math.random() < 0.18 ? EXPRESSIONS[Math.floor(Math.random() * EXPRESSIONS.length)] : null,
     fermata: false,
     accent: cur.peakNorm > 0.72,
@@ -501,7 +496,7 @@ const pad = (n) => String(n).padStart(2, "0");
 
 // 가사 미리보기 한 줄 (제목 아래)
 function lyricLine(notes) {
-  return notes.filter((n) => n.lyric).map((n) => n.lyric).join(" ");
+  return notes.length ? UNIFIED_LYRIC : "";
 }
 
 // ── 악보 SVG ──
@@ -569,7 +564,7 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffL
 
     els.push(<ellipse key={`h${i}`} cx={x} cy={y} rx={headRx} ry={headRy} transform={`rotate(-15 ${x} ${y})`} fill={col} />);
     els.push(<line key={`st${i}`} x1={x + headRx - 0.4} y1={y} x2={x + headRx - 0.4} y2={y - 22} stroke={col} strokeWidth="1.2" />);
-    if (n.lyric) els.push(<text key={`ly${i}`} x={x} y={top + staffH + 20} fontSize="9" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>{n.lyric}</text>);
+    if (i === 0 && n.lyric) els.push(<text key={`ly${i}`} x={W / 2} y={top + staffH + 20} fontSize="10" fill="#111" textAnchor="middle" style={{fontFamily:SERIF}}>{n.lyric}</text>);
     if (!n.live && i % 4 === 0) {
       els.push(<text key={`dy${i}`} x={x} y={top + staffH + 36} fontSize="14" fontStyle="italic" fontWeight="700" fill={col} textAnchor="middle" style={{fontFamily:SERIF}}>{n.dyn}</text>);
     }
@@ -660,9 +655,9 @@ function drawScoreSheet({ notes, meta, onBlob }) {
     ctx.restore();
     ctx.strokeStyle = "#111"; ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.moveTo(x + headRx, y); ctx.lineTo(x + headRx, y - 26); ctx.stroke();
-    if (n.lyric) {
+    if (i === 0 && n.lyric) {
       ctx.fillStyle = "#111"; ctx.font = `11px ${SERIF}`; ctx.textAlign = "center";
-      ctx.fillText(n.lyric, x, top + staffH + 24);
+      ctx.fillText(n.lyric, W / 2, top + staffH + 24);
     }
   });
 
@@ -714,6 +709,7 @@ function DoneView({ notes, meta, r, onReset, onSave, onCopy, saving, voice, onVo
     <>
       <div style={S.sheet} className="pop">
         <h1 style={S.brandTitle}>aakbo</h1>
+        <p style={S.lyricSub}>{UNIFIED_LYRIC}</p>
         <div style={S.doneScore}>
           <ScoreSheet notes={notes} meta={meta} W={760} playIdx={playIdx} showHeader minStaffLines={PREPARED_STAFF_LINES} />
         </div>
@@ -770,7 +766,8 @@ const S = {
   center: { background: "#fff", padding: "48px 24px", textAlign: "center", boxShadow: "0 16px 50px rgba(0,0,0,0.28)" },
   armText: { fontSize: 16, color: "#111", letterSpacing: 1, textAlign: "center", fontFamily: SERIF },
 
-  brandTitle: { textAlign: "center", fontSize: 34, fontWeight: 400, letterSpacing: 6, color: "#111", margin: "0 0 14px", fontFamily: SERIF },
+  brandTitle: { textAlign: "center", fontSize: 34, fontWeight: 400, letterSpacing: 6, color: "#111", margin: "0 0 8px", fontFamily: SERIF },
+  lyricSub: { textAlign: "center", fontSize: 12, color: "#444", margin: "0 0 12px", letterSpacing: 2, fontFamily: SERIF },
   brandTitleSmall: { textAlign: "center", fontSize: 22, fontWeight: 400, letterSpacing: 4, color: "#111", margin: "0 0 8px", fontFamily: SERIF },
   scoreStage: { margin: "0 0 18px", background: "#fff" },
   liveScore: { margin: "0 0 12px", maxHeight: 420, overflowY: "auto", background: "#fff" },
