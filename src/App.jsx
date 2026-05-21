@@ -149,13 +149,21 @@ function playbackToneDur(n, gapToNext, preset) {
 }
 
 class ScorePlayer {
-  constructor() { this.ctx = null; this.master = null; this.timers = []; this.nodes = []; this.playing = false; }
+  constructor() { this.ctx = null; this.master = null; this.recordDest = null; this.timers = []; this.nodes = []; this.playing = false; }
   ensureCtx() {
     if (!this.ctx || this.ctx.state === "closed") {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      this.master = this.ctx.createGain(); this.master.gain.value = 1; this.master.connect(this.ctx.destination);
+      this.master = this.ctx.createGain();
+      this.recordDest = this.ctx.createMediaStreamDestination();
+      this.master.gain.value = 1;
+      this.master.connect(this.ctx.destination);
+      this.master.connect(this.recordDest);
     }
     if (this.ctx.state === "suspended") this.ctx.resume();
+  }
+  getRecordingStream() {
+    this.ensureCtx();
+    return this.recordDest ? this.recordDest.stream : null;
   }
   stop() {
     this.timers.forEach((t) => clearTimeout(t));
@@ -496,6 +504,7 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [diag, setDiag] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [savingVideo, setSavingVideo] = useState(false);
   const [presetKey, setPresetKey] = useState("standard");
   const [voice, setVoice] = useState("ahh");
   const [playing, setPlaying] = useState(false);
@@ -738,6 +747,92 @@ export default function App() {
     } catch (e) { setSaving(false); alert("이미지 저장에 실패했어요."); }
   }, [result, meta]);
 
+  const saveVideo = useCallback(async () => {
+    if (!result || savingVideo) return;
+    if (!notesRef.current.length) { alert("먼저 비명을 채보해줘."); return; }
+    if (!playerRef.current) playerRef.current = new ScorePlayer();
+    const p = playerRef.current;
+    p.stop();
+    setPlaying(false);
+    setPlayIdx(-1);
+    setSavingVideo(true);
+    try {
+      const scoreBlob = await drawScoreSheetBlob(notesRef.current, meta);
+      const bitmap = await createImageBitmap(scoreBlob);
+      const W = bitmap.width;
+      const H = bitmap.height;
+      const canvas = document.createElement("canvas");
+      canvas.width = W;
+      canvas.height = H;
+      const ctx = canvas.getContext("2d");
+      const fps = 30;
+      const vidStream = canvas.captureStream(fps);
+      const audioStream = p.getRecordingStream();
+      const mixed = new MediaStream();
+      vidStream.getVideoTracks().forEach((t) => mixed.addTrack(t));
+      if (audioStream) audioStream.getAudioTracks().forEach((t) => mixed.addTrack(t));
+
+      const chunks = [];
+      const rec = new MediaRecorder(mixed, { mimeType: "video/webm;codecs=vp8,opus" });
+      rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+      const done = new Promise((resolve, reject) => {
+        rec.onstop = resolve;
+        rec.onerror = () => reject(new Error("recording failed"));
+      });
+      rec.start(100);
+
+      let raf = 0;
+      const startAt = performance.now();
+      const drawLoop = () => {
+        const t = (performance.now() - startAt) / 1000;
+        ctx.clearRect(0, 0, W, H);
+        ctx.drawImage(bitmap, 0, 0, W, H);
+        const playable = notesRef.current.filter((n) => n.midi != null && !n.rest);
+        if (playable.length) {
+          let idx = -1;
+          for (let i = 0; i < playable.length; i++) {
+            const a = playable[i].at || 0;
+            const b = playable[i + 1] ? (playable[i + 1].at || a + 0.2) : a + 0.6;
+            if (t >= a && t < b) { idx = i; break; }
+          }
+          if (idx >= 0) {
+            const q = 0.08 + idx / Math.max(1, playable.length - 1) * 0.84;
+            const x = Math.round(W * q);
+            ctx.fillStyle = "rgba(192,20,60,0.18)";
+            ctx.fillRect(x - 20, 0, 40, H);
+          }
+        }
+        if (savingVideo) raf = requestAnimationFrame(drawLoop);
+      };
+      raf = requestAnimationFrame(drawLoop);
+
+      p.play(notesRef.current, voice, preset, (i) => setPlayIdx(i), () => {
+        setPlaying(false);
+        setPlayIdx(-1);
+        setTimeout(() => rec.stop(), 240);
+      });
+      setPlaying(true);
+      await done;
+      cancelAnimationFrame(raf);
+      bitmap.close();
+      const blob = new Blob(chunks, { type: "video/webm" });
+      const url = URL.createObjectURL(blob);
+      const d = result.ts;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `aakbo-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}.webm`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("동영상 저장에 실패했어요.");
+    } finally {
+      setSavingVideo(false);
+      setPlaying(false);
+      setPlayIdx(-1);
+      if (playerRef.current) playerRef.current.stop();
+    }
+  }, [result, meta, voice, preset, savingVideo]);
+
   const togglePlay = useCallback(() => {
     if (!playerRef.current) playerRef.current = new ScorePlayer();
     const p = playerRef.current;
@@ -764,7 +859,7 @@ export default function App() {
         {phase === "arming" && <div style={S.center}><p style={S.armText}>마이크 권한 허용해줘…</p></div>}
         {phase === "denied" && <DeniedView diag={diag} inIframe={inIframe} isSecure={isSecure} hasMic={hasMic} onReset={reset} />}
         {phase === "recording" && <RecordView notes={notes} level={level} elapsed={elapsed} onStop={stop} presetKey={presetKey} onPreset={setPresetKey} />}
-        {phase === "done" && result && <DoneView notes={notes} meta={meta} r={result} onReset={reset} onSave={saveImage} onCopy={copyLink} saving={saving} voice={voice} onVoice={changeVoice} playing={playing} playIdx={playIdx} onTogglePlay={togglePlay} presetKey={presetKey} onPreset={setPresetKey} />}
+        {phase === "done" && result && <DoneView notes={notes} meta={meta} r={result} onReset={reset} onSave={saveImage} onSaveVideo={saveVideo} onCopy={copyLink} saving={saving} savingVideo={savingVideo} voice={voice} onVoice={changeVoice} playing={playing} playIdx={playIdx} onTogglePlay={togglePlay} presetKey={presetKey} onPreset={setPresetKey} />}
       </div>
     </div>
   );
@@ -999,6 +1094,19 @@ function staffYC(midi, top, staffH) {
   return staffY(midi, top, staffH);
 }
 
+function drawScoreSheetBlob(notes, meta) {
+  return new Promise((resolve, reject) => {
+    try {
+      drawScoreSheet({ notes, meta, onBlob: (blob) => {
+        if (!blob) reject(new Error("score blob empty"));
+        else resolve(blob);
+      }});
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 function IdleView({ onStart, inIframe }) {
   return (
     <div style={S.sheet}>
@@ -1039,7 +1147,7 @@ function RecordView({ notes, level, elapsed, onStop, presetKey, onPreset }) {
   );
 }
 
-function DoneView({ notes, meta, r, onReset, onSave, onCopy, saving, voice, onVoice, playing, playIdx, onTogglePlay, presetKey, onPreset }) {
+function DoneView({ notes, meta, r, onReset, onSave, onSaveVideo, onCopy, saving, savingVideo, voice, onVoice, playing, playIdx, onTogglePlay, presetKey, onPreset }) {
   return (
     <>
       <div style={S.sheet} className="pop">
@@ -1061,6 +1169,7 @@ function DoneView({ notes, meta, r, onReset, onSave, onCopy, saving, voice, onVo
       </div>
       <div style={S.actions}>
         <button style={S.btnMain} onClick={onSave} disabled={saving}>{saving ? "저장 중…" : "🎼 악보 이미지 저장"}</button>
+        <button style={S.btnMainAlt} onClick={onSaveVideo} disabled={savingVideo}>{savingVideo ? "영상 저장 중…" : "🎬 연주 동영상 저장"}</button>
         <div style={S.actionRow}>
           <button style={S.btnHalf} onClick={onCopy}>🔗 링크 복사</button>
           <button style={S.btnHalf} onClick={onReset}>다시 지르기</button>
@@ -1127,6 +1236,7 @@ const S = {
   actions: { marginTop: 16 },
   actionRow: { display: "flex", gap: 10, marginTop: 10 },
   btnMain: { width: "100%", padding: "16px", background: "#111", color: "#fff", border: "none", fontSize: 14.5, fontWeight: 700, letterSpacing: 1, cursor: "pointer", fontFamily: MONO },
+  btnMainAlt: { width: "100%", padding: "15px", marginTop: 8, background: "#fff", color: "#111", border: "1.5px solid #111", fontSize: 13.5, fontWeight: 700, letterSpacing: 1, cursor: "pointer", fontFamily: MONO },
   btnHalf: { flex: 1, padding: "14px", background: "#fff", color: "#111", border: "1.5px solid #111", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
   btnStop: { width: "100%", padding: "16px", background: "#111", color: "#fff", border: "none", fontSize: 15, fontWeight: 700, letterSpacing: 2, cursor: "pointer", fontFamily: MONO },
 
