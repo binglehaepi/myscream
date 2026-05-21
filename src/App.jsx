@@ -47,6 +47,13 @@ const PRESETS = {
       accentBoost: 0.12,
       fermataHold: 1.25,
       timeStretch: 1.24,
+      trailVoices: 1,
+      trailDecaySec: 0.36,
+      trailDetuneCents: 4,
+      splitThresholdNorm: 0.74,
+      splitIntervals: [7],
+      splitMix: 0.12,
+      maxActiveVoices: 4,
     },
   },
   standard: {
@@ -74,6 +81,13 @@ const PRESETS = {
       accentBoost: 0.16,
       fermataHold: 1.55,
       timeStretch: 1.36,
+      trailVoices: 2,
+      trailDecaySec: 0.48,
+      trailDetuneCents: 6,
+      splitThresholdNorm: 0.62,
+      splitIntervals: [7, 12],
+      splitMix: 0.18,
+      maxActiveVoices: 5,
     },
   },
   extreme: {
@@ -101,6 +115,13 @@ const PRESETS = {
       accentBoost: 0.32,
       fermataHold: 1.8,
       timeStretch: 1.18,
+      trailVoices: 2,
+      trailDecaySec: 0.64,
+      trailDetuneCents: 9,
+      splitThresholdNorm: 0.48,
+      splitIntervals: [7, 12],
+      splitMix: 0.24,
+      maxActiveVoices: 6,
     },
   },
 };
@@ -149,7 +170,7 @@ function playbackToneDur(n, gapToNext, preset) {
 }
 
 class ScorePlayer {
-  constructor() { this.ctx = null; this.master = null; this.recordDest = null; this.timers = []; this.nodes = []; this.playing = false; }
+  constructor() { this.ctx = null; this.master = null; this.recordDest = null; this.timers = []; this.nodes = []; this.playing = false; this.recentTones = []; this.activeVoices = 0; }
   ensureCtx() {
     if (!this.ctx || this.ctx.state === "closed") {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -173,6 +194,8 @@ class ScorePlayer {
       try { node.disconnect(); } catch (_) {}
     });
     this.nodes = [];
+    this.recentTones = [];
+    this.activeVoices = 0;
     this.playing = false;
   }
   track(node, end) { this.nodes.push({ node, end }); return node; }
@@ -212,6 +235,9 @@ class ScorePlayer {
     const sustained = dur >= 0.4;
     const glideRatio = glide || 1;
     const glideT = legato ? Math.min(dur * 0.85, Math.max(0.06, dur * 0.5)) : Math.min(dur * 0.7, 0.12);
+    const releaseAt = end + 0.08;
+    this.activeVoices += 1;
+    this.timers.push(setTimeout(() => { this.activeVoices = Math.max(0, this.activeVoices - 1); }, Math.max(0, (releaseAt - this.ctx.currentTime) * 1000)));
 
     if (voice === "piano") {
       const partials = [1, 2, 3, 4];
@@ -318,6 +344,28 @@ class ScorePlayer {
       this.track(g, end);
     }
   }
+
+  addRecentTone(tone) {
+    this.recentTones.push(tone);
+    if (this.recentTones.length > 10) this.recentTones.shift();
+  }
+
+  trailLayers(atSec, preset, maxCount) {
+    const out = [];
+    const nowList = [...this.recentTones].reverse();
+    for (let i = 0; i < nowList.length && out.length < maxCount; i++) {
+      const t = nowList[i];
+      const age = atSec - t.at;
+      if (age <= 0 || age > preset.playback.trailDecaySec) continue;
+      const decay = clamp(1 - age / preset.playback.trailDecaySec, 0, 1);
+      out.push({
+        freq: t.freq,
+        norm: t.norm * decay * 0.8,
+        detune: (i % 2 === 0 ? 1 : -1) * preset.playback.trailDetuneCents,
+      });
+    }
+    return out;
+  }
   play(notes, voice, preset, onStep, onEnd) {
     this.ensureCtx();
     this.stop();
@@ -338,6 +386,7 @@ class ScorePlayer {
     let lastFreq = null;
     let totalSec = 0;
     let tFallback = 0;
+    const hardVoiceLimit = Math.max(2, preset.playback.maxActiveVoices || 5);
     playable.forEach(({ n, i }, pi) => {
       const t0Raw = n.at != null ? n.at : tFallback;
       const t0 = t0Raw * (preset.playback.timeStretch || 1);
@@ -359,7 +408,27 @@ class ScorePlayer {
       const detune = n.detune ?? 0;
       const vibDepth = n.vibrato ? clamp(8 + (n.vibratoDepth || 0) * preset.playback.vibratoDepthScale, 4, 48) : 0;
       const accentBoost = n.accent ? preset.playback.accentBoost : 0;
-      this.playNote(baseFreq, start, toneDur, n.norm ?? 0.5, voice, glide, detune, legato, vibDepth, accentBoost, preset);
+      if (this.activeVoices < hardVoiceLimit) this.playNote(baseFreq, start, toneDur, n.norm ?? 0.5, voice, glide, detune, legato, vibDepth, accentBoost, preset);
+
+      const splitOn = (n.norm ?? 0) >= preset.playback.splitThresholdNorm || n.accent || (n.vibratoDepth || 0) > 20;
+      if (splitOn) {
+        const splitIntervals = preset.playback.splitIntervals || [];
+        splitIntervals.forEach((semi, si) => {
+          if (this.activeVoices >= hardVoiceLimit) return;
+          const hf = baseFreq * Math.pow(2, semi / 12);
+          const hn = (n.norm ?? 0.5) * preset.playback.splitMix * (si === 0 ? 1 : 0.85);
+          this.playNote(hf, start, toneDur * 0.96, hn, voice, glide, detune + (si % 2 ? -3 : 3), legato, vibDepth * 0.8, 0, preset);
+        });
+      }
+
+      const trails = this.trailLayers(t0Raw, preset, preset.playback.trailVoices || 0);
+      trails.forEach((tr, ti) => {
+        if (this.activeVoices >= hardVoiceLimit) return;
+        const td = Math.max(0.12, toneDur * (0.65 - ti * 0.08));
+        this.playNote(tr.freq, start, td, tr.norm, voice, null, tr.detune, true, vibDepth * 0.45, 0, preset);
+      });
+
+      this.addRecentTone({ at: t0Raw, freq: baseFreq, norm: n.norm ?? 0.5 });
       lastFreq = baseFreq;
       this.timers.push(setTimeout(() => { if (this.playing) onStep && onStep(i); }, t0 * 1000 + 30));
     });
