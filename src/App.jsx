@@ -53,11 +53,11 @@ function dynamicFor(norm) {
   return "pp";
 }
 
-// ── 재생 엔진 (채보 길이에 맞춰 연속 재생) ──
-function playbackDur(n) {
-  const base = n.dur || 0.4;
-  const ext = n.fermata ? base * 0.35 : 0;
-  return Math.max(0.12, Math.min(6.5, base + ext));
+// ── 재생 엔진 (녹음 시각·박자·피치 반영) ──
+function playbackToneDur(n, gapToNext) {
+  const span = n.span || n.dur || NOTE_BEAD_DUR;
+  if (gapToNext != null) return Math.max(0.05, Math.min(gapToNext * 0.9, span * 1.15));
+  return Math.max(0.05, Math.min(0.5, span * 1.1));
 }
 
 class ScorePlayer {
@@ -98,13 +98,14 @@ class ScorePlayer {
     }
     return end;
   }
-  playNote(freq, start, dur, norm, voice, glide) {
+  playNote(freq, start, dur, norm, voice, glide, detune = 0) {
     const ctx = this.ctx;
     const t = start;
-    const vol = Math.min(0.9, 0.28 + norm * 0.55);
+    const vol = Math.min(0.95, 0.2 + norm * 0.65);
     const end = t + dur + 0.08;
-    const sustained = dur >= 0.55;
+    const sustained = dur >= 0.4;
     const glideRatio = glide || 1;
+    const glideT = Math.min(dur * 0.7, 0.12);
 
     if (voice === "piano") {
       const partials = [1, 2, 3, 4];
@@ -116,7 +117,8 @@ class ScorePlayer {
         const o = ctx.createOscillator();
         o.type = sustained ? "sine" : "triangle";
         o.frequency.setValueAtTime(freq * p, t);
-        if (glide && p === 1) o.frequency.exponentialRampToValueAtTime(freq * p * glideRatio, t + dur);
+        o.detune.setValueAtTime(detune, t);
+        if (glide && p === 1) o.frequency.exponentialRampToValueAtTime(freq * p * glideRatio, t + glideT);
         const pg = ctx.createGain();
         pg.gain.value = gains[i];
         o.connect(pg);
@@ -133,8 +135,8 @@ class ScorePlayer {
         const o = ctx.createOscillator();
         o.type = "square";
         o.frequency.setValueAtTime(freq, t);
-        o.detune.value = det;
-        if (glide) o.frequency.exponentialRampToValueAtTime(freq * glideRatio, t + dur);
+        o.detune.setValueAtTime(detune + det, t);
+        if (glide) o.frequency.exponentialRampToValueAtTime(freq * glideRatio, t + glideT);
         o.connect(g);
         o.start(t);
         this.track(o, end);
@@ -144,7 +146,8 @@ class ScorePlayer {
       const src = ctx.createOscillator();
       src.type = "sawtooth";
       src.frequency.setValueAtTime(freq, t);
-      if (glide) src.frequency.exponentialRampToValueAtTime(freq * glideRatio, t + dur);
+      src.detune.setValueAtTime(detune, t);
+      if (glide) src.frequency.exponentialRampToValueAtTime(freq * glideRatio, t + glideT);
       const f1 = ctx.createBiquadFilter();
       f1.type = "bandpass";
       f1.frequency.value = 720 + norm * 380;
@@ -181,28 +184,43 @@ class ScorePlayer {
     this.stop();
     this.playing = true;
     const ctx = this.ctx;
-    const gap = 0.05;
-    let cursor = ctx.currentTime + 0.05;
-    let elapsedMs = 50;
+    const base = ctx.currentTime + 0.06;
+    const playable = [];
     notes.forEach((n, i) => {
-      const noteDur = playbackDur(n);
-      if (n.midi != null) {
-        const glide = n.gliss
-          ? (n.glissTo != null ? midiToFreq(n.glissTo) / midiToFreq(n.midi) : 1.35)
-          : null;
-        this.playNote(midiToFreq(n.midi), cursor, noteDur, n.norm, voice, glide);
+      if (n.midi != null && !n.rest) playable.push({ n, i });
+    });
+    if (!playable.length) {
+      this.playing = false;
+      onStep && onStep(-1);
+      onEnd && onEnd();
+      return;
+    }
+    let lastMidi = null;
+    let totalSec = 0;
+    let tFallback = 0;
+    playable.forEach(({ n, i }, pi) => {
+      const t0 = n.at != null ? n.at : tFallback;
+      const next = playable[pi + 1];
+      const nextT = next ? (next.n.at != null ? next.n.at : t0 + (n.span || NOTE_BEAD_DUR)) : null;
+      const gapToNext = nextT != null ? Math.max(0.04, nextT - t0) : null;
+      tFallback = nextT ?? t0 + (n.span || NOTE_BEAD_DUR);
+      const toneDur = playbackToneDur(n, gapToNext);
+      const start = base + t0;
+      totalSec = Math.max(totalSec, t0 + toneDur);
+      let glide = null;
+      if (lastMidi != null && lastMidi !== n.midi) {
+        glide = midiToFreq(n.midi) / midiToFreq(lastMidi);
       }
-      const ms = elapsedMs;
-      this.timers.push(setTimeout(() => { if (this.playing) onStep && onStep(i); }, ms));
-      const advance = n.midi != null ? noteDur + gap : 0.1;
-      cursor += advance;
-      elapsedMs += advance * 1000;
+      const detune = n.detune ?? 0;
+      this.playNote(midiToFreq(n.midi), start, toneDur, n.norm ?? 0.5, voice, glide, detune);
+      lastMidi = n.midi;
+      this.timers.push(setTimeout(() => { if (this.playing) onStep && onStep(i); }, t0 * 1000 + 30));
     });
     this.timers.push(setTimeout(() => {
       this.playing = false;
       onStep && onStep(-1);
       onEnd && onEnd();
-    }, elapsedMs + 200));
+    }, totalSec * 1000 + 250));
   }
 }
 
@@ -244,11 +262,22 @@ function beadInterval(norm) {
   return Math.max(0.12, 0.24 - norm * 0.1);
 }
 
+function centsBetween(freq, midi) {
+  if (!freq || midi == null) return 0;
+  return Math.max(-80, Math.min(80, Math.round(1200 * Math.log2(freq / midiToFreq(midi)))));
+}
+
 function buildFinalNote(cur, dur = NOTE_BEAD_DUR) {
+  const midi = cur.lastMidi ?? cur.midi;
+  const span = Math.max(0.05, cur.dur || dur);
+  const at = (cur.beadStartMs - cur.sessionStartMs) / 1000;
   return {
-    midi: cur.lastMidi ?? cur.midi,
+    midi,
     norm: cur.peakNorm,
     dur,
+    span,
+    at,
+    detune: centsBetween(cur.lastFreq, midi),
     dyn: dynamicFor(cur.peakNorm),
     lyric: lyricFor(dur, cur.peakNorm),
     expr: Math.random() < 0.18 ? EXPRESSIONS[Math.floor(Math.random() * EXPRESSIONS.length)] : null,
@@ -314,6 +343,7 @@ export default function App() {
       if (prev != null) { while (midi - prev > 8) midi -= 12; while (prev - midi > 8) midi += 12; }
       lastMidiRef.current = midi;
     }
+    const liveFreq = freq > 0 ? freq : null;
     const now = performance.now();
     setElapsed((now - startRef.current) / 1000);
     const VOICING = norm > 0.08 && midi != null;
@@ -323,17 +353,26 @@ export default function App() {
       if (cur && Math.abs((cur.lastMidi ?? midi) - midi) <= 3) {
         cur.dur = (now - cur.startMs) / 1000;
         if (norm > cur.peakNorm) { cur.peakNorm = norm; cur.peakMidi = midi; }
+        if (liveFreq) cur.lastFreq = liveFreq;
         cur.lastMidi = midi;
         if (cur.dur >= beadInterval(cur.peakNorm)) {
           appendBead(cur);
-          curNoteRef.current = { midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm, startMs: now, dur: 0, gliss: false, glissTo: null };
+          curNoteRef.current = {
+            midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm,
+            startMs: now, beadStartMs: now, sessionStartMs: startRef.current,
+            dur: 0, lastFreq: liveFreq, gliss: false, glissTo: null,
+          };
           commitCurrent(true);
         } else {
           commitCurrent(false);
         }
       } else {
         finalizeCurrent();
-        curNoteRef.current = { midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm, startMs: now, dur: 0, gliss: false, glissTo: null };
+        curNoteRef.current = {
+          midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm,
+          startMs: now, beadStartMs: now, sessionStartMs: startRef.current,
+          dur: 0, lastFreq: liveFreq, gliss: false, glissTo: null,
+        };
         commitCurrent(true);
       }
     } else {
@@ -431,7 +470,7 @@ export default function App() {
     const p = playerRef.current;
     if (playing) { p.stop(); setPlaying(false); setPlayIdx(-1); return; }
     setPlaying(true);
-    p.play(notesRef.current.filter(n => !n.rest), voice, (i) => setPlayIdx(i), () => { setPlaying(false); setPlayIdx(-1); });
+    p.play(notesRef.current, voice, (i) => setPlayIdx(i), () => { setPlaying(false); setPlayIdx(-1); });
   }, [playing, voice]);
 
   const changeVoice = useCallback((v) => {
