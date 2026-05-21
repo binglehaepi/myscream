@@ -1,31 +1,21 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 
 // ─────────────────────────────────────────────
-// 비명 악보 — SCREAM SCORE
-// 마이크 pitch(음정) → 오선지 위 음 높이
-// 마이크 음량(RMS) → 음표 크기
-// 지르는 동안 음표가 왼→오로 찍히며 악보가 길어진다.
-// 멈추면 완성된 악보 + png 저장.
+// MYSCREAM — 비명으로 직접 채우는 그래픽 악보
+// 미리 깔린 긴 오선지 위에, 지르든 안 지르든 계속 기록된다.
+// 음정 → 선의 높이, 음량 → 잉크의 굵기/뭉침.
+// 정적은 가는 선과 쉼표로, 비명은 휘갈긴 잉크 덩어리로.
+// 음악 기호(다이내믹/페르마타 등)가 흩뿌려진다.
 // 모든 처리는 브라우저 안에서 (녹음 X, 서버 X)
 // ─────────────────────────────────────────────
 
-// 음표 하나가 담는 정보: { midi, norm(음량), t }
-// midi: 음 높이(MIDI note number). null이면 무음(쉼표 취급)
+function midiToFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
 
-function midiToFreq(m) {
-  return 440 * Math.pow(2, (m - 69) / 12);
-}
+const SYMBOLS = ["𝆑", "𝆏", "fff", "ppp", "𝄐", "ƒ", "𝆪", "𝆫", "≈", "~", "𝄢", "sƒz", "pp", "ff", "𝆒𝆓"];
 
-// ── 재생 엔진: 음표 배열을 순차 재생. 음색 3종 ──
-// voice: "piano" | "synth" | "ahh"
-// 각 음표 하나당 한 노트. 진행 콜백으로 현재 재생 인덱스 표시.
+// ── 재생 엔진 ──
 class ScorePlayer {
-  constructor() {
-    this.ctx = null;
-    this.master = null;
-    this.timers = [];
-    this.playing = false;
-  }
+  constructor() { this.ctx = null; this.master = null; this.timers = []; this.playing = false; }
   ensureCtx() {
     if (!this.ctx || this.ctx.state === "closed") {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -35,179 +25,119 @@ class ScorePlayer {
     }
     if (this.ctx.state === "suspended") this.ctx.resume();
   }
-  stop() {
-    this.timers.forEach((t) => clearTimeout(t));
-    this.timers = [];
-    this.playing = false;
-  }
-  // 한 음 발음
+  stop() { this.timers.forEach((t) => clearTimeout(t)); this.timers = []; this.playing = false; }
   playNote(freq, start, dur, norm, voice) {
     const ctx = this.ctx;
     const t = start;
-    const vol = 0.12 + norm * 0.25;
-
+    const vol = 0.1 + norm * 0.28;
     if (voice === "piano") {
-      // 배음 몇 개 쌓고 빠른 어택 + 지수 감쇠 → 피아노 비슷
-      const partials = [1, 2, 3];
-      const gains = [1, 0.4, 0.18];
-      const g = ctx.createGain();
-      g.connect(this.master);
+      const partials = [1, 2, 3]; const gains = [1, 0.4, 0.18];
+      const g = ctx.createGain(); g.connect(this.master);
       g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(vol, t + 0.008);
+      g.gain.linearRampToValueAtTime(vol, t + 0.006);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur * 1.6);
       partials.forEach((p, i) => {
-        const o = ctx.createOscillator();
-        o.type = "triangle";
-        o.frequency.value = freq * p;
-        const pg = ctx.createGain();
-        pg.gain.value = gains[i];
-        o.connect(pg); pg.connect(g);
-        o.start(t); o.stop(t + dur * 1.7);
+        const o = ctx.createOscillator(); o.type = "triangle"; o.frequency.value = freq * p;
+        const pg = ctx.createGain(); pg.gain.value = gains[i];
+        o.connect(pg); pg.connect(g); o.start(t); o.stop(t + dur * 1.7);
       });
     } else if (voice === "synth") {
-      // 8비트 사각파 + 살짝 디튠
-      const g = ctx.createGain();
-      g.connect(this.master);
+      const g = ctx.createGain(); g.connect(this.master);
       g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(vol, t + 0.01);
+      g.gain.linearRampToValueAtTime(vol, t + 0.008);
       g.gain.setValueAtTime(vol, t + dur * 0.7);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
       [0, 8].forEach((det) => {
-        const o = ctx.createOscillator();
-        o.type = "square";
-        o.frequency.value = freq;
-        o.detune.value = det;
-        o.connect(g);
-        o.start(t); o.stop(t + dur + 0.02);
+        const o = ctx.createOscillator(); o.type = "square"; o.frequency.value = freq; o.detune.value = det;
+        o.connect(g); o.start(t); o.stop(t + dur + 0.02);
       });
     } else {
-      // "아~" 보컬: 톱니파 + 포먼트 밴드패스 2개로 모음 'a' 흉내
-      const src = ctx.createOscillator();
-      src.type = "sawtooth";
-      src.frequency.value = freq;
+      const src = ctx.createOscillator(); src.type = "sawtooth"; src.frequency.value = freq;
       const g = ctx.createGain();
       g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(vol, t + 0.05);
+      g.gain.linearRampToValueAtTime(vol, t + 0.04);
       g.gain.setValueAtTime(vol, t + dur * 0.6);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-      // 모음 'a' 포먼트: ~800Hz, ~1200Hz
-      const f1 = ctx.createBiquadFilter();
-      f1.type = "bandpass"; f1.frequency.value = 800; f1.Q.value = 8;
-      const f2 = ctx.createBiquadFilter();
-      f2.type = "bandpass"; f2.frequency.value = 1200; f2.Q.value = 10;
+      const f1 = ctx.createBiquadFilter(); f1.type = "bandpass"; f1.frequency.value = 800; f1.Q.value = 8;
+      const f2 = ctx.createBiquadFilter(); f2.type = "bandpass"; f2.frequency.value = 1200; f2.Q.value = 10;
       const mix = ctx.createGain();
-      src.connect(f1); src.connect(f2);
-      f1.connect(mix); f2.connect(mix);
-      // 살짝 비브라토
-      const lfo = ctx.createOscillator();
-      lfo.frequency.value = 5.5;
-      const lfoG = ctx.createGain();
-      lfoG.gain.value = freq * 0.01;
+      src.connect(f1); src.connect(f2); f1.connect(mix); f2.connect(mix);
+      const lfo = ctx.createOscillator(); lfo.frequency.value = 5.5;
+      const lfoG = ctx.createGain(); lfoG.gain.value = freq * 0.01;
       lfo.connect(lfoG); lfoG.connect(src.frequency);
       mix.connect(g); g.connect(this.master);
-      src.start(t); src.stop(t + dur + 0.05);
-      lfo.start(t); lfo.stop(t + dur + 0.05);
+      src.start(t); src.stop(t + dur + 0.05); lfo.start(t); lfo.stop(t + dur + 0.05);
     }
   }
-  // notes 재생. onStep(i), onEnd 콜백.
   play(notes, voice, onStep, onEnd) {
-    this.ensureCtx();
-    this.stop();
-    this.playing = true;
+    this.ensureCtx(); this.stop(); this.playing = true;
     const ctx = this.ctx;
-    const step = 0.22; // 음표 간 간격(초)
-    const noteDur = 0.32;
+    const step = 0.12;   // 더 빠른 재생
+    const noteDur = 0.2;
     let scheduled = 0;
     notes.forEach((n, i) => {
-      const at = ctx.currentTime + 0.06 + i * step;
-      if (n.midi != null) {
-        this.playNote(midiToFreq(n.midi), at, noteDur, n.norm, voice);
-      }
-      const ms = (0.06 + i * step) * 1000;
+      const at = ctx.currentTime + 0.05 + i * step;
+      if (n.midi != null) this.playNote(midiToFreq(n.midi), at, noteDur, n.norm, voice);
+      const ms = (0.05 + i * step) * 1000;
       this.timers.push(setTimeout(() => { if (this.playing) onStep && onStep(i); }, ms));
       scheduled = ms;
     });
     this.timers.push(setTimeout(() => {
-      this.playing = false;
-      onStep && onStep(-1);
-      onEnd && onEnd();
-    }, scheduled + step * 1000 + 200));
+      this.playing = false; onStep && onStep(-1); onEnd && onEnd();
+    }, scheduled + step * 1000 + 150));
   }
 }
 
-const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-
-function midiToName(m) {
-  if (m == null) return "—";
-  const oct = Math.floor(m / 12) - 1;
-  return NOTE_NAMES[m % 12] + oct;
-}
-
-// autocorrelation 기반 pitch 검출. 실패 시 -1
 function detectPitch(buf, sampleRate) {
   const SIZE = buf.length;
   let rms = 0;
   for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
   rms = Math.sqrt(rms / SIZE);
-  if (rms < 0.01) return -1; // 너무 조용하면 패스
-
-  let r1 = 0, r2 = SIZE - 1;
-  const thres = 0.2;
+  if (rms < 0.008) return -1;
+  let r1 = 0, r2 = SIZE - 1; const thres = 0.2;
   for (let i = 0; i < SIZE / 2; i++) if (Math.abs(buf[i]) < thres) { r1 = i; break; }
   for (let i = 1; i < SIZE / 2; i++) if (Math.abs(buf[SIZE - i]) < thres) { r2 = SIZE - i; break; }
-
-  const b = buf.slice(r1, r2);
-  const n = b.length;
+  const b = buf.slice(r1, r2); const n = b.length;
   const c = new Array(n).fill(0);
-  for (let i = 0; i < n; i++)
-    for (let j = 0; j < n - i; j++) c[i] += b[j] * b[j + i];
-
-  let d = 0;
-  while (c[d] > c[d + 1]) d++;
+  for (let i = 0; i < n; i++) for (let j = 0; j < n - i; j++) c[i] += b[j] * b[j + i];
+  let d = 0; while (c[d] > c[d + 1]) d++;
   let maxval = -1, maxpos = -1;
-  for (let i = d; i < n; i++) {
-    if (c[i] > maxval) { maxval = c[i]; maxpos = i; }
-  }
-  let T0 = maxpos;
-  if (T0 <= 0) return -1;
-
-  // 포물선 보간
+  for (let i = d; i < n; i++) if (c[i] > maxval) { maxval = c[i]; maxpos = i; }
+  let T0 = maxpos; if (T0 <= 0) return -1;
   const x1 = c[T0 - 1] || 0, x2 = c[T0], x3 = c[T0 + 1] || 0;
-  const a = (x1 + x3 - 2 * x2) / 2;
-  const bb = (x3 - x1) / 2;
+  const a = (x1 + x3 - 2 * x2) / 2; const bb = (x3 - x1) / 2;
   if (a) T0 = T0 - bb / (2 * a);
-
   const freq = sampleRate / T0;
-  if (freq < 70 || freq > 1200) return -1; // 사람 목소리 범위 밖이면 버림
+  if (freq < 70 || freq > 1200) return -1;
   return freq;
 }
+function freqToMidi(f) { return Math.round(69 + 12 * Math.log2(f / 440)); }
 
-function freqToMidi(f) {
-  return Math.round(69 + 12 * Math.log2(f / 440));
+const LOW_MIDI = 52, HIGH_MIDI = 84;
+
+// 음높이(midi)를 0~1로 (1=높음). 무음이면 null
+function pitchRatio(midi) {
+  if (midi == null) return null;
+  const c = Math.max(LOW_MIDI - 4, Math.min(HIGH_MIDI + 4, midi));
+  return (c - LOW_MIDI) / (HIGH_MIDI - LOW_MIDI);
 }
-
-// 오선지 표시 범위 (MIDI). 대략 G3~A5
-const LOW_MIDI = 55;  // G3
-const HIGH_MIDI = 81; // A5
 
 export default function App() {
   const [phase, setPhase] = useState("idle");
   const [notes, setNotes] = useState([]);
   const [level, setLevel] = useState(0);
-  const [curMidi, setCurMidi] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const [result, setResult] = useState(null);
   const [diag, setDiag] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [voice, setVoice] = useState("piano"); // piano | synth | ahh
+  const [voice, setVoice] = useState("piano");
   const [playing, setPlaying] = useState(false);
-  const [playIdx, setPlayIdx] = useState(-1); // 재생 중 강조할 음표 인덱스
+  const [playIdx, setPlayIdx] = useState(-1);
 
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
   const streamRef = useRef(null);
   const rafRef = useRef(null);
-  const bufRef = useRef(null);
   const timeBufRef = useRef(null);
   const playerRef = useRef(null);
 
@@ -236,7 +166,6 @@ export default function App() {
     const ctx = audioCtxRef.current;
     analyser.getFloatTimeDomainData(timeBufRef.current);
 
-    // 음량
     let sum = 0;
     for (let i = 0; i < timeBufRef.current.length; i++) sum += timeBufRef.current[i] * timeBufRef.current[i];
     const rms = Math.sqrt(sum / timeBufRef.current.length);
@@ -244,33 +173,28 @@ export default function App() {
     setLevel(norm);
     peakRef.current = Math.max(peakRef.current, norm);
 
-    // pitch
     const freq = detectPitch(timeBufRef.current, ctx.sampleRate);
     let midi = null;
-    if (freq > 0 && norm > 0.1) {
+    if (freq > 0 && norm > 0.09) {
       midi = freqToMidi(freq);
-      // 옥타브 점프 억제: 직전 음과 12반음 이상 튀면 옥타브 보정
       const prev = lastMidiRef.current;
-      if (prev != null) {
-        while (midi - prev > 8) midi -= 12;
-        while (prev - midi > 8) midi += 12;
-      }
+      if (prev != null) { while (midi - prev > 8) midi -= 12; while (prev - midi > 8) midi += 12; }
       lastMidiRef.current = midi;
-      setCurMidi(midi);
-    } else {
-      setCurMidi(null);
     }
 
     const now = performance.now();
     setElapsed((now - startRef.current) / 1000);
 
-    // 130ms마다 음표 하나 찍기 (지르고 있을 때만)
-    if (norm > 0.1 && now - lastNoteRef.current > 130) {
+    // 100ms마다 무조건 기록. 지르지 않아도 점(무음)이 찍힌다.
+    if (now - lastNoteRef.current > 100) {
       lastNoteRef.current = now;
-      notesRef.current = [...notesRef.current, { midi, norm, t: (now - startRef.current) / 1000 }];
+      // 음악 기호 랜덤 흩뿌리기: 큰 소리거나 가끔
+      let sym = null;
+      if (norm > 0.45 && Math.random() < 0.25) sym = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+      else if (Math.random() < 0.04) sym = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+      notesRef.current = [...notesRef.current, { midi, norm, sym, t: (now - startRef.current) / 1000 }];
       setNotes(notesRef.current);
     }
-
     rafRef.current = requestAnimationFrame(tick);
   }, []);
 
@@ -288,14 +212,9 @@ export default function App() {
       source.connect(analyser);
       analyserRef.current = analyser;
       timeBufRef.current = new Float32Array(analyser.fftSize);
-
-      peakRef.current = 0;
-      startRef.current = performance.now();
-      lastNoteRef.current = 0;
-      lastMidiRef.current = null;
-      notesRef.current = [];
-      setNotes([]);
-      setElapsed(0);
+      peakRef.current = 0; startRef.current = performance.now();
+      lastNoteRef.current = 0; lastMidiRef.current = null;
+      notesRef.current = []; setNotes([]); setElapsed(0);
       setPhase("recording");
       rafRef.current = requestAnimationFrame(tick);
     } catch (e) {
@@ -306,28 +225,14 @@ export default function App() {
 
   const stop = useCallback(() => {
     const dur = (performance.now() - startRef.current) / 1000;
-    const peak = peakRef.current;
     const pitched = notesRef.current.filter((n) => n.midi != null);
     const midis = pitched.map((n) => n.midi);
     const highest = midis.length ? Math.max(...midis) : null;
     const lowest = midis.length ? Math.min(...midis) : null;
-    const range = highest != null && lowest != null ? highest - lowest : 0;
-
-    // 음역대 등급
-    let grade;
-    if (notesRef.current.length < 3) grade = { label: "무음", note: "악보가 비었어요" };
-    else if (range >= 18) grade = { label: "오페라 가수", note: "음역대 미쳤다" };
-    else if (range >= 11) grade = { label: "노래방 본선급", note: "기복이 심함" };
-    else if (range >= 5) grade = { label: "흥얼흥얼", note: "안정적인 비명" };
-    else grade = { label: "한 음 집착", note: "단조로운 절규" };
-
     setResult({
-      dur, peak,
-      count: notesRef.current.length,
-      highest, lowest, range,
-      grade,
-      ts: new Date(),
-      no: Math.floor(Math.random() * 9000) + 1000,
+      dur, count: notesRef.current.length, pitchedCount: pitched.length,
+      highest, lowest,
+      ts: new Date(), no: Math.floor(Math.random() * 9000) + 1000,
     });
     setPhase("done");
     cleanup();
@@ -336,10 +241,9 @@ export default function App() {
   const reset = useCallback(() => {
     if (playerRef.current) playerRef.current.stop();
     setPlaying(false); setPlayIdx(-1);
-    notesRef.current = []; setNotes([]); setLevel(0); setCurMidi(null); setElapsed(0); setResult(null); setPhase("idle");
+    notesRef.current = []; setNotes([]); setLevel(0); setElapsed(0); setResult(null); setPhase("idle");
   }, []);
 
-  // png 저장: 오선지+음표만 (스코어/등급 정보 없이 깔끔하게)
   const saveImage = useCallback(() => {
     if (!result) return;
     setSaving(true);
@@ -349,45 +253,29 @@ export default function App() {
         const a = document.createElement("a");
         const d = result.ts;
         a.href = url;
-        a.download = `scream-score-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}.png`;
-        a.click();
-        URL.revokeObjectURL(url);
-        setSaving(false);
+        a.download = `myscream-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}.png`;
+        a.click(); URL.revokeObjectURL(url); setSaving(false);
       }});
     } catch (e) { setSaving(false); alert("이미지 저장에 실패했어요."); }
   }, [result]);
 
-  // 재생 / 정지
   const togglePlay = useCallback(() => {
     if (!playerRef.current) playerRef.current = new ScorePlayer();
     const p = playerRef.current;
-    if (playing) {
-      p.stop();
-      setPlaying(false);
-      setPlayIdx(-1);
-      return;
-    }
+    if (playing) { p.stop(); setPlaying(false); setPlayIdx(-1); return; }
     setPlaying(true);
-    p.play(
-      notesRef.current,
-      voice,
-      (i) => setPlayIdx(i),
-      () => { setPlaying(false); setPlayIdx(-1); }
-    );
+    p.play(notesRef.current, voice, (i) => setPlayIdx(i), () => { setPlaying(false); setPlayIdx(-1); });
   }, [playing, voice]);
 
-  // 음색 바꾸면 재생 중지 (다음 재생 때 새 음색 적용)
   const changeVoice = useCallback((v) => {
     if (playerRef.current) playerRef.current.stop();
-    setPlaying(false);
-    setPlayIdx(-1);
-    setVoice(v);
+    setPlaying(false); setPlayIdx(-1); setVoice(v);
   }, []);
 
   useEffect(() => () => { if (playerRef.current) playerRef.current.stop(); }, []);
 
   const copyLink = useCallback(async () => {
-    try { await navigator.clipboard.writeText(window.location.href); alert("링크 복사 완료! 트위터에 자랑하세요 🎼"); }
+    try { await navigator.clipboard.writeText(window.location.href); alert("링크 복사 완료! 🎼"); }
     catch (e) { alert(window.location.href); }
   }, []);
 
@@ -398,7 +286,7 @@ export default function App() {
         {phase === "idle" && <IdleView onStart={start} inIframe={inIframe} />}
         {phase === "arming" && <div style={S.center}><p style={S.armText}>마이크 권한 허용해줘…</p></div>}
         {phase === "denied" && <DeniedView diag={diag} inIframe={inIframe} isSecure={isSecure} hasMic={hasMic} onReset={reset} />}
-        {phase === "recording" && <RecordView notes={notes} level={level} curMidi={curMidi} elapsed={elapsed} onStop={stop} />}
+        {phase === "recording" && <RecordView notes={notes} level={level} elapsed={elapsed} onStop={stop} />}
         {phase === "done" && result && <DoneView notes={notes} r={result} onReset={reset} onSave={saveImage} onCopy={copyLink} saving={saving} voice={voice} onVoice={changeVoice} playing={playing} playIdx={playIdx} onTogglePlay={togglePlay} />}
       </div>
       <p style={S.privacy}>🔒 소리는 녹음되지 않아요. 음정·음량만 분석하고 바로 사라집니다.</p>
@@ -408,186 +296,189 @@ export default function App() {
 
 const pad = (n) => String(n).padStart(2, "0");
 
-// ── 오선지 + 음표 렌더 (라이브 SVG / 저장 캔버스 공용 좌표 계산) ──
-function noteY(midi, top, staffH) {
-  // midi를 LOW~HIGH 범위에 매핑. 높을수록 위.
-  if (midi == null) return top + staffH / 2;
-  const clamped = Math.max(LOW_MIDI - 6, Math.min(HIGH_MIDI + 6, midi));
-  const r = (clamped - LOW_MIDI) / (HIGH_MIDI - LOW_MIDI);
-  return top + staffH - r * staffH;
-}
+// ── 그래픽 스코어 SVG 생성 (라이브 + 결과 공용) ──
+// 미리 깔린 오선지 위에, 음표들을 "선으로 잇고" 잉크 덩어리로 표현
+function ScoreSvg({ notes, W, lineH, padX, playIdx = -1, follow = false }) {
+  const staffH = 56;           // 한 단 오선지 높이
+  const gap = lineH / 4;       // 오선 간격
+  const noteSpacing = 7;
+  const topPad = 18;
+  const blockH = staffH + 34;
+  const perLine = Math.max(8, Math.floor((W - padX * 2 - 14) / noteSpacing));
+  // 최소 단 수: 미리 오선지가 깔려있는 느낌 위해 항상 여러 단 확보
+  const usedLines = Math.ceil(Math.max(notes.length, 1) / perLine);
+  const minLines = follow ? Math.max(usedLines, 4) : Math.max(usedLines, 3);
+  const totalLines = minLines;
+  const H = topPad + totalLines * blockH + 10;
 
-function LiveStaff({ notes, curMidi }) {
-  // 가로로 흐르는 오선지. 최근 음표 위주로 보여줌(스크롤 효과)
-  const W = 320, top = 30, staffH = 120, lineGap = staffH / 4;
-  const noteSpacing = 12;
-  const visibleCount = Math.floor((W - 40) / noteSpacing);
-  const shown = notes.slice(-visibleCount);
-  const startX = 30;
+  // 음표를 단별로 분할, 각 단에서 선 path 생성
+  const lineEls = [];
+  for (let li = 0; li < totalLines; li++) {
+    const top = topPad + li * blockH + 8;
+    // 오선 5줄 (미리 깔린 빈 보표)
+    const staffLines = [0,1,2,3,4].map((i) => (
+      <line key={`s${li}-${i}`} x1={padX} y1={top + i*gap} x2={W - padX} y2={top + i*gap} stroke="#1a1a1a" strokeWidth="0.7" />
+    ));
+    // 음자리표 자리 세로선
+    const clef = <text key={`c${li}`} x={padX - 2} y={top + staffH*0.62} fontSize={gap*2.6} fill="#1a1a1a" style={{fontFamily:"serif"}}>𝄞</text>;
+
+    const slice = notes.slice(li * perLine, (li + 1) * perLine);
+    // 선 잇기: 음정 있는 구간을 path로
+    let pathD = "";
+    const blobs = [];
+    const syms = [];
+    slice.forEach((n, i) => {
+      const x = padX + 16 + i * noteSpacing;
+      const r = pitchRatio(n.midi);
+      const globalIdx = li * perLine + i;
+      const isPlay = globalIdx === playIdx;
+      if (r == null) {
+        // 무음: 중앙 근처에서 살짝 흔들리는 가는 선
+        const y = top + staffH/2 + Math.sin(i*0.9) * 3;
+        pathD += (pathD ? " L" : "M") + ` ${x} ${y}`;
+      } else {
+        const y = top + staffH - r * staffH;
+        pathD += (pathD ? " L" : "M") + ` ${x} ${y}`;
+        // 음량 크면 잉크 덩어리(휘갈김)
+        if (n.norm > 0.3) {
+          const sz = 1.5 + n.norm * 7;
+          blobs.push(
+            <ellipse key={`b${li}-${i}`} cx={x} cy={y} rx={sz*1.3} ry={sz}
+              fill={isPlay ? "#e0245e" : "#111"} transform={`rotate(${-30 + Math.sin(i)*40} ${x} ${y})`}
+              opacity={0.9} />
+          );
+          // 위로 뻗는 거친 stem
+          if (n.norm > 0.5) {
+            blobs.push(<line key={`st${li}-${i}`} x1={x} y1={y} x2={x + (Math.random()*4-2)} y2={y - 14 - n.norm*16} stroke={isPlay ? "#e0245e" : "#111"} strokeWidth={0.8 + n.norm} />);
+          }
+        } else {
+          // 작은 소리: 작은 점
+          blobs.push(<circle key={`d${li}-${i}`} cx={x} cy={y} r={1 + n.norm*2.5} fill={isPlay ? "#e0245e" : "#222"} />);
+        }
+      }
+      // 음악 기호 흩뿌리기
+      if (n.sym) {
+        const sy = top - 2 + Math.random() * (staffH + 10);
+        syms.push(<text key={`y${li}-${i}`} x={x} y={sy} fontSize={9 + (n.norm)*7} fill="#111" style={{fontFamily:"serif", fontStyle:"italic"}} opacity={0.85}>{n.sym}</text>);
+      }
+    });
+
+    lineEls.push(
+      <g key={`g${li}`}>
+        {staffLines}
+        {clef}
+        {pathD && <path d={pathD} fill="none" stroke="#111" strokeWidth="1.1" strokeLinejoin="round" opacity={0.85} />}
+        {blobs}
+        {syms}
+      </g>
+    );
+  }
 
   return (
-    <svg viewBox={`0 0 ${W} 200`} style={{ width: "100%", height: "auto" }}>
-      {/* 오선 5줄 */}
-      {[0, 1, 2, 3, 4].map((i) => (
-        <line key={i} x1={10} y1={top + i * lineGap} x2={W - 10} y2={top + i * lineGap} stroke="#111" strokeWidth="1" />
-      ))}
-      {/* 음자리표 느낌의 세로 바 */}
-      <line x1={14} y1={top} x2={14} y2={top + staffH} stroke="#111" strokeWidth="2" />
-      {/* 음표들 */}
-      {shown.map((n, i) => {
-        const x = startX + i * noteSpacing;
-        const y = noteY(n.midi, top, staffH);
-        const rad = 2.5 + n.norm * 5;
-        return n.midi == null ? (
-          <text key={i} x={x} y={top + staffH / 2 + 4} fontSize="12" fill="#bbb" textAnchor="middle">𝄽</text>
-        ) : (
-          <g key={i}>
-            <ellipse cx={x} cy={y} rx={rad * 1.2} ry={rad} fill="#111" transform={`rotate(-20 ${x} ${y})`} />
-            <line x1={x + rad} y1={y} x2={x + rad} y2={y - 22} stroke="#111" strokeWidth="1.5" />
-          </g>
-        );
-      })}
-      {/* 현재 음 표시 */}
-      {curMidi != null && (
-        <text x={W - 12} y={20} fontSize="12" fill="#d11" textAnchor="end" fontWeight="700">{midiToName(curMidi)}</text>
-      )}
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
+      <rect x="0" y="0" width={W} height={H} fill="#fffdf7" />
+      {lineEls}
     </svg>
   );
 }
 
-// 저장용 캔버스 그리기 — 오선지 + 음표만 (정보/등급 없이 깔끔하게)
+// 저장용 캔버스 — 오선지 + 그래픽 음표만 (정보 없이)
 function drawStaffOnly({ notes, onBlob }) {
-  const W = 800, PAD = 50;
-  const dpr = 2;
-  const top0 = 60;
-  const staffH = 120, lineGap = staffH / 4;
-  const noteSpacing = 16;
-  const perLine = Math.floor((W - PAD * 2 - 20) / noteSpacing);
-  const lineBlockH = staffH + 70;
-  const totalLines = Math.max(1, Math.ceil(notes.length / perLine));
-
-  const H = top0 + totalLines * lineBlockH + 40;
+  const W = 820, padX = 44, dpr = 2;
+  const staffH = 70, gap = staffH / 4, noteSpacing = 9, topPad = 30, blockH = staffH + 44;
+  const perLine = Math.max(8, Math.floor((W - padX * 2 - 16) / noteSpacing));
+  const usedLines = Math.ceil(Math.max(notes.length, 1) / perLine);
+  const totalLines = Math.max(usedLines, 4);
+  const H = topPad + totalLines * blockH + 20;
 
   const canvas = document.createElement("canvas");
   canvas.width = W * dpr; canvas.height = H * dpr;
   const ctx = canvas.getContext("2d");
   ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#fffdf7";
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fffdf7"; ctx.fillRect(0, 0, W, H);
 
   for (let li = 0; li < totalLines; li++) {
-    const top = top0 + li * lineBlockH;
-    ctx.strokeStyle = "#111"; ctx.lineWidth = 1;
-    for (let i = 0; i < 5; i++) {
-      ctx.beginPath(); ctx.moveTo(PAD, top + i * lineGap); ctx.lineTo(W - PAD, top + i * lineGap); ctx.stroke();
-    }
-    ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(PAD + 4, top); ctx.lineTo(PAD + 4, top + staffH); ctx.stroke();
+    const top = topPad + li * blockH + 10;
+    ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 0.8;
+    for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.moveTo(padX, top + i*gap); ctx.lineTo(W - padX, top + i*gap); ctx.stroke(); }
+    ctx.fillStyle = "#1a1a1a"; ctx.font = `${gap*2.6}px serif`; ctx.textAlign = "left";
+    ctx.fillText("\u{1D11E}", padX - 4, top + staffH*0.66);
 
     const slice = notes.slice(li * perLine, (li + 1) * perLine);
+    // 선 잇기
+    ctx.beginPath(); let started = false;
     slice.forEach((n, i) => {
-      const x = PAD + 24 + i * noteSpacing;
-      if (n.midi == null) {
-        ctx.fillStyle = "#ccc"; ctx.font = "16px serif"; ctx.textAlign = "center";
-        ctx.fillText("\uD834\uDD3D", x, top + staffH / 2 + 5);
-        return;
+      const x = padX + 18 + i * noteSpacing;
+      const r = pitchRatio(n.midi);
+      const y = r == null ? top + staffH/2 + Math.sin(i*0.9)*4 : top + staffH - r * staffH;
+      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = "rgba(17,17,17,0.85)"; ctx.lineWidth = 1.2; ctx.stroke();
+
+    // 잉크 덩어리 + 기호
+    slice.forEach((n, i) => {
+      const x = padX + 18 + i * noteSpacing;
+      const r = pitchRatio(n.midi);
+      if (r != null) {
+        const y = top + staffH - r * staffH;
+        if (n.norm > 0.3) {
+          const sz = 2 + n.norm * 8;
+          ctx.fillStyle = "#111"; ctx.save(); ctx.translate(x, y);
+          ctx.rotate((-30 + Math.sin(i)*40) * Math.PI/180);
+          ctx.beginPath(); ctx.ellipse(0, 0, sz*1.3, sz, 0, 0, Math.PI*2); ctx.fill(); ctx.restore();
+          if (n.norm > 0.5) {
+            ctx.strokeStyle = "#111"; ctx.lineWidth = 0.8 + n.norm;
+            ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + (Math.random()*4-2), y - 16 - n.norm*18); ctx.stroke();
+          }
+        } else {
+          ctx.fillStyle = "#222"; ctx.beginPath(); ctx.arc(x, y, 1.2 + n.norm*3, 0, Math.PI*2); ctx.fill();
+        }
       }
-      const y = noteYCanvas(n.midi, top, staffH);
-      const rad = 3 + n.norm * 6;
-      ctx.fillStyle = "#111";
-      ctx.save();
-      ctx.translate(x, y); ctx.rotate(-0.35);
-      ctx.beginPath(); ctx.ellipse(0, 0, rad * 1.2, rad, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
-      ctx.strokeStyle = "#111"; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(x + rad, y); ctx.lineTo(x + rad, y - 26); ctx.stroke();
+      if (n.sym) {
+        const sy = top - 2 + Math.random() * (staffH + 12);
+        ctx.fillStyle = "#111"; ctx.font = `italic ${10 + n.norm*8}px serif`; ctx.textAlign = "center";
+        ctx.fillText(n.sym, x, sy);
+      }
     });
   }
-
   canvas.toBlob((blob) => onBlob(blob), "image/png");
-}
-
-function noteYCanvas(midi, top, staffH) {
-  if (midi == null) return top + staffH / 2;
-  const clamped = Math.max(LOW_MIDI - 6, Math.min(HIGH_MIDI + 6, midi));
-  const r = (clamped - LOW_MIDI) / (HIGH_MIDI - LOW_MIDI);
-  return top + staffH - r * staffH;
 }
 
 function IdleView({ onStart, inIframe }) {
   return (
     <div style={S.card}>
-      <p style={S.brand}>SCREAM SCORE</p>
-      <h1 style={S.title}>비명 악보</h1>
-      <p style={S.desc}>마이크에 대고 질러봐.<br />너의 비명을 악보로 채보해드립니다.<br />높이 지르면 높은 음, 크게 지르면 큰 음표.</p>
+      <p style={S.brand}>GRAPHIC SCORE</p>
+      <h1 style={S.title}>MYSCREAM</h1>
+      <p style={S.desc}>빈 악보가 너를 기다린다.<br />지르든, 침묵하든 — 전부 기록된다.<br />너의 비명으로 악보를 채워라.</p>
       {inIframe && (
         <div style={S.iframeNote}>⚠️ 미리보기(iframe)에선 마이크가 막혀요.<br /><b>새 창(↗) 또는 배포 주소</b>에서 열어주세요.</div>
       )}
-      <button style={S.btnMain} onClick={onStart}>🎤 지를 준비 됐어</button>
+      <button style={S.btnMain} onClick={onStart}>🎤 채보 시작</button>
     </div>
   );
 }
 
-function RecordView({ notes, level, curMidi, elapsed, onStop }) {
+function RecordView({ notes, level, elapsed, onStop }) {
   return (
     <div style={S.card}>
-      <p style={S.recLabel}>● REC  {elapsed.toFixed(1)}s · {notes.length}음</p>
-      <div style={S.staffWrap}>
-        <LiveStaff notes={notes} curMidi={curMidi} />
+      <p style={S.recLabel}>● 기록 중  {elapsed.toFixed(1)}s</p>
+      <div style={S.staffWrapLive}>
+        <ScoreSvg notes={notes} W={330} lineH={56} padX={14} follow />
       </div>
-      <div style={S.meterMini}>
-        <div style={{ ...S.meterFill, width: `${level * 100}%` }} />
-      </div>
-      <p style={S.hint}>{level > 0.5 ? "그렇지! 음 올려봐!" : level > 0.15 ? "더 크게!" : "지르면 음표가 찍혀…"}</p>
+      <div style={S.meterMini}><div style={{ ...S.meterFill, width: `${level * 100}%` }} /></div>
       <button style={S.btnStop} onClick={onStop}>■ 채보 끝내기</button>
     </div>
   );
 }
 
 function DoneView({ notes, r, onReset, onSave, onCopy, saving, voice, onVoice, playing, playIdx, onTogglePlay }) {
-  // 화면용: 단을 접어서 SVG로 미리보기
-  const W = 320, PAD = 16, top = 26, staffH = 100, lineGap = staffH / 4;
-  const noteSpacing = 9;
-  const perLine = Math.floor((W - PAD * 2 - 16) / noteSpacing);
-  const totalLines = Math.max(1, Math.ceil(notes.length / perLine));
-  const lineBlockH = staffH + 36;
-  const svgH = totalLines * lineBlockH + 10;
-
   return (
     <>
       <div style={S.card} className="pop">
-        <p style={S.brand}>SCREAM SCORE</p>
-        <p style={S.doneTitle}>나의 비명 채보</p>
-        <div style={{ ...S.staffWrap, maxHeight: 360, overflowY: "auto" }}>
-          <svg viewBox={`0 0 ${W} ${svgH}`} style={{ width: "100%", height: "auto" }}>
-            {Array.from({ length: totalLines }).map((_, li) => {
-              const t = top + li * lineBlockH;
-              const slice = notes.slice(li * perLine, (li + 1) * perLine);
-              return (
-                <g key={li}>
-                  {[0,1,2,3,4].map((i) => (
-                    <line key={i} x1={PAD} y1={t + i*lineGap} x2={W-PAD} y2={t + i*lineGap} stroke="#111" strokeWidth="0.8" />
-                  ))}
-                  <line x1={PAD+2} y1={t} x2={PAD+2} y2={t+staffH} stroke="#111" strokeWidth="1.5" />
-                  {slice.map((n, i) => {
-                    const globalIdx = li * perLine + i;
-                    const isPlaying = globalIdx === playIdx;
-                    const x = PAD + 14 + i * noteSpacing;
-                    if (n.midi == null) return <text key={i} x={x} y={t+staffH/2+3} fontSize="9" fill="#ccc" textAnchor="middle">𝄽</text>;
-                    const y = noteY(n.midi, t, staffH);
-                    const rad = 2 + n.norm * 4;
-                    const col = isPlaying ? "#e0245e" : "#111";
-                    return (
-                      <g key={i}>
-                        <ellipse cx={x} cy={y} rx={(rad*1.2) * (isPlaying ? 1.6 : 1)} ry={rad * (isPlaying ? 1.6 : 1)} fill={col} transform={`rotate(-20 ${x} ${y})`} />
-                        <line x1={x+rad} y1={y} x2={x+rad} y2={y-18} stroke={col} strokeWidth="1.2" />
-                      </g>
-                    );
-                  })}
-                </g>
-              );
-            })}
-          </svg>
+        <p style={S.brand}>GRAPHIC SCORE — No.{r.no}</p>
+        <p style={S.doneTitle}>MYSCREAM</p>
+        <div style={{ ...S.staffWrap, maxHeight: 420, overflowY: "auto" }}>
+          <ScoreSvg notes={notes} W={330} lineH={56} padX={14} playIdx={playIdx} />
         </div>
 
         <div style={S.playerBox}>
@@ -596,20 +487,7 @@ function DoneView({ notes, r, onReset, onSave, onCopy, saving, voice, onVoice, p
             <button style={voice === "synth" ? S.voiceOn : S.voiceOff} onClick={() => onVoice("synth")}>👾 전자음</button>
             <button style={voice === "ahh" ? S.voiceOn : S.voiceOff} onClick={() => onVoice("ahh")}>🗣️ 아~</button>
           </div>
-          <button style={S.btnPlay} onClick={onTogglePlay}>
-            {playing ? "■ 정지" : "▶︎ 내 비명 연주하기"}
-          </button>
-        </div>
-
-        <div style={S.dash} />
-        <Row k="음표 수" v={`${r.count} 개`} />
-        <Row k="최고음 / 최저음" v={`${midiToName(r.highest)} / ${midiToName(r.lowest)}`} />
-        <Row k="음역대" v={`${r.range} 반음`} />
-        <Row k="지속 시간" v={`${r.dur.toFixed(1)} s`} />
-        <div style={S.dash} />
-        <div style={S.gradeBox}>
-          <p style={S.gradeLabel}>{r.grade.label}</p>
-          <p style={S.gradeNote}>“{r.grade.note}”</p>
+          <button style={S.btnPlay} onClick={onTogglePlay}>{playing ? "■ 정지" : "▶︎ 내 비명 연주하기"}</button>
         </div>
       </div>
 
@@ -652,48 +530,35 @@ function DeniedView({ diag, inIframe, isSecure, hasMic, onReset }) {
   );
 }
 
-function Row({ k, v }) {
-  return <div style={S.row}><span style={S.rowK}>{k}</span><span style={S.dots} /><span style={S.rowV}>{v}</span></div>;
-}
-
 const MONO = "'Courier New', ui-monospace, monospace";
 
 const S = {
   page: { minHeight: "100vh", background: "#e8e3d6", backgroundImage: "repeating-linear-gradient(0deg, rgba(0,0,0,0.015) 0 1px, transparent 1px 26px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "32px 16px", fontFamily: MONO },
   frame: { width: "100%", maxWidth: 360 },
-  card: { background: "#fffdf7", padding: "32px 24px", boxShadow: "0 12px 40px rgba(0,0,0,0.22)", border: "1px solid #ddd6c4" },
+  card: { background: "#fffdf7", padding: "28px 22px", boxShadow: "0 12px 40px rgba(0,0,0,0.22)", border: "1px solid #ddd6c4" },
   center: { background: "#fffdf7", padding: "48px 24px", textAlign: "center", boxShadow: "0 12px 40px rgba(0,0,0,0.22)" },
   armText: { fontSize: 16, color: "#111", letterSpacing: 1, textAlign: "center" },
 
-  brand: { textAlign: "center", fontSize: 11, letterSpacing: 4, color: "#9a9484", marginBottom: 16 },
-  title: { textAlign: "center", fontSize: 36, fontWeight: 800, letterSpacing: 2, color: "#1a1a1a", margin: "0 0 18px" },
-  desc: { textAlign: "center", fontSize: 13, lineHeight: 1.9, color: "#555", marginBottom: 28 },
+  brand: { textAlign: "center", fontSize: 10, letterSpacing: 4, color: "#9a9484", marginBottom: 14 },
+  title: { textAlign: "center", fontSize: 40, fontWeight: 800, letterSpacing: 3, color: "#1a1a1a", margin: "0 0 18px", fontStyle: "italic" },
+  desc: { textAlign: "center", fontSize: 12.5, lineHeight: 1.9, color: "#555", marginBottom: 26 },
   iframeNote: { border: "1.5px dashed #111", padding: "12px 14px", fontSize: 11.5, lineHeight: 1.7, color: "#333", marginBottom: 20, textAlign: "left" },
 
-  recLabel: { textAlign: "center", fontSize: 12, letterSpacing: 1, color: "#d11", fontWeight: 700, marginBottom: 14 },
-  staffWrap: { background: "#fffdf7", padding: "4px 0", marginBottom: 14 },
-  meterMini: { height: 6, background: "#e5e0d2", borderRadius: 3, overflow: "hidden", marginBottom: 12 },
+  recLabel: { textAlign: "center", fontSize: 12, letterSpacing: 1, color: "#d11", fontWeight: 700, marginBottom: 12 },
+  staffWrapLive: { background: "#fffdf7", border: "1px solid #eee5cf", marginBottom: 14, maxHeight: 340, overflowY: "auto" },
+  staffWrap: { background: "#fffdf7", border: "1px solid #eee5cf", marginBottom: 4 },
+  meterMini: { height: 6, background: "#e5e0d2", borderRadius: 3, overflow: "hidden", marginBottom: 14 },
   meterFill: { height: "100%", background: "#111", transition: "width 60ms linear" },
-  hint: { textAlign: "center", fontSize: 14, fontWeight: 700, color: "#111", marginBottom: 20, letterSpacing: 1 },
 
-  doneTitle: { textAlign: "center", fontSize: 22, fontWeight: 800, color: "#111", letterSpacing: 1, marginBottom: 18 },
-  dash: { borderTop: "2px dashed #ccc", margin: "14px 0" },
-  row: { display: "flex", alignItems: "baseline", margin: "7px 0" },
-  rowK: { fontSize: 13, color: "#333", whiteSpace: "nowrap" },
-  dots: { flex: 1, borderBottom: "1px dotted #ccc", margin: "0 6px", transform: "translateY(-3px)" },
-  rowV: { fontSize: 13, color: "#111", fontWeight: 700, whiteSpace: "nowrap" },
+  doneTitle: { textAlign: "center", fontSize: 30, fontWeight: 800, fontStyle: "italic", color: "#111", letterSpacing: 2, marginBottom: 16 },
 
-  gradeBox: { border: "2px solid #111", padding: "16px 12px", textAlign: "center", margin: "8px 0 0" },
-  gradeLabel: { fontSize: 24, fontWeight: 800, color: "#111", letterSpacing: 2, marginBottom: 8 },
-  gradeNote: { fontSize: 12, color: "#666", fontStyle: "italic" },
-
-  playerBox: { marginTop: 14, padding: "14px 0 0" },
+  playerBox: { marginTop: 14 },
   voiceRow: { display: "flex", gap: 6, marginBottom: 10 },
   voiceOn: { flex: 1, padding: "10px 4px", background: "#111", color: "#fff", border: "1.5px solid #111", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
   voiceOff: { flex: 1, padding: "10px 4px", background: "#fffdf7", color: "#111", border: "1.5px solid #ccc", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
   btnPlay: { width: "100%", padding: "14px", background: "#e0245e", color: "#fff", border: "none", fontSize: 15, fontWeight: 700, letterSpacing: 1, cursor: "pointer", fontFamily: MONO },
 
-  actions: { marginTop: 20 },
+  actions: { marginTop: 18 },
   actionRow: { display: "flex", gap: 10, marginTop: 10 },
   btnMain: { width: "100%", padding: "16px", background: "#111", color: "#fff", border: "none", fontSize: 15, fontWeight: 700, letterSpacing: 1, cursor: "pointer", fontFamily: MONO },
   btnHalf: { flex: 1, padding: "14px", background: "#fffdf7", color: "#111", border: "1.5px solid #111", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: MONO },
