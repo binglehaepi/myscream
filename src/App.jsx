@@ -236,15 +236,7 @@ function staffY(midi, top, staffH) {
   return top + staffH - r * staffH;
 }
 
-// 첫 화면용 예시 악보 데이터 (레퍼런스 재현)
-const DEMO_NOTES = [
-  { midi: 69, norm: 0.95, dur: 1.6, gliss: true, glissTo: 73, dyn: "fff", lyric: "아아아아아아악!보", expr: "molto sostenuto", fermata: true },
-  { midi: 67, norm: 0.9, dur: 1.4, dyn: "fff", lyric: "아아아아아아", expr: "espressivo, doloroso", tie: true },
-  { midi: 0, rest: true },
-  { midi: 65, norm: 0.7, dur: 1.0, dyn: "ff", lyric: "아아아아", expr: "poco meno intenso" },
-  { midi: 0, rest: true, breath: true },
-  { midi: 64, norm: 0.95, dur: 0.6, dyn: "fff", lyric: "아아악 보", expr: "con forza", accent: true, fermata: true },
-];
+const PREPARED_STAFF_LINES = 5;
 
 export default function App() {
   const [phase, setPhase] = useState("idle");
@@ -295,7 +287,7 @@ export default function App() {
     setLevel(norm);
     const freq = detectPitch(timeBufRef.current, ctx.sampleRate);
     let midi = null;
-    if (freq > 0 && norm > 0.09) {
+    if (freq > 0 && norm > 0.07) {
       midi = freqToMidi(freq);
       const prev = lastMidiRef.current;
       if (prev != null) { while (midi - prev > 8) midi -= 12; while (prev - midi > 8) midi += 12; }
@@ -303,24 +295,24 @@ export default function App() {
     }
     const now = performance.now();
     setElapsed((now - startRef.current) / 1000);
-    const VOICING = norm > 0.1 && midi != null;
+    const VOICING = norm > 0.08 && midi != null;
     if (VOICING) {
       lastVoiceTimeRef.current = now;
       const cur = curNoteRef.current;
-      if (cur && Math.abs((cur.lastMidi ?? midi) - midi) <= 2) {
+      if (cur && Math.abs((cur.lastMidi ?? midi) - midi) <= 3) {
         cur.dur = (now - cur.startMs) / 1000;
         cur.peakMidi = norm > cur.peakNorm ? midi : cur.peakMidi;
         if (norm > cur.peakNorm) cur.peakNorm = norm;
-        if (Math.abs(midi - cur.midi) >= 2) { cur.gliss = true; cur.glissTo = midi; }
+        if (Math.abs(midi - cur.midi) >= 3) { cur.gliss = true; cur.glissTo = midi; }
         cur.lastMidi = midi;
         commitCurrent(false);
       } else {
         finalizeCurrent();
-        curNoteRef.current = { midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm, startMs: now, dur: 0.12, gliss: false, glissTo: null };
+        curNoteRef.current = { midi, lastMidi: midi, peakMidi: midi, norm, peakNorm: norm, startMs: now, dur: 0.08, gliss: false, glissTo: null };
         commitCurrent(true);
       }
     } else {
-      if (now - lastVoiceTimeRef.current > 160) finalizeCurrent();
+      if (now - lastVoiceTimeRef.current > 90) finalizeCurrent();
     }
     rafRef.current = requestAnimationFrame(tick);
 
@@ -445,23 +437,23 @@ const pad = (n) => String(n).padStart(2, "0");
 
 // 가사 미리보기 한 줄 (제목 아래)
 function lyricLine(notes) {
-  const ls = notes.filter(n => n.lyric).map(n => n.lyric);
-  return ls.length ? ls.join(" ") : "아아아아아아악!보 아아아아아아 - 아아아아 - 아아악 보";
+  return notes.filter((n) => n.lyric).map((n) => n.lyric).join(" ");
 }
 
-// ── 악보 SVG (레퍼런스 톤) ──
-function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true }) {
+// ── 악보 SVG ──
+function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true, minStaffLines = 1 }) {
   const padX = 30, gap = 7.5, staffH = gap * 4;
-  const noteTop = 56;
-  const blockH = staffH + 92;
+  const noteTop = showHeader ? 56 : 20;
+  const blockH = staffH + 72;
   const layout = []; let x = padX + 64, line = 0; const lineMaxX = W - padX - 14;
   notes.forEach((n, i) => {
-    const w = n.rest ? 22 : 22 + Math.min(80, (n.dur || 0.4) * 48);
+    const w = n.rest ? 22 : 18 + Math.min(90, (n.dur || 0.4) * (n.live ? 62 : 52));
     if (x + w > lineMaxX) { line++; x = padX + 64; }
-    layout.push({ n, i, x, w, line }); x += w + 10;
+    layout.push({ n, i, x, w, line }); x += w + (n.live ? 6 : 10);
   });
-  const totalLines = Math.max(1, (layout.length ? layout[layout.length - 1].line + 1 : 1));
-  const headH = showHeader ? 30 : 6;
+  const noteLines = layout.length ? layout[layout.length - 1].line + 1 : 0;
+  const totalLines = Math.max(minStaffLines, noteLines, 1);
+  const headH = showHeader ? 30 : 4;
   const H = noteTop + headH + totalLines * blockH;
 
   const els = [];
@@ -492,7 +484,7 @@ function ScoreSheet({ notes, meta, W, playIdx = -1, showHeader = true }) {
   layout.forEach(({ n, i, x, w, line }) => {
     const top = noteTop + headH + line * blockH + 8;
     const isPlay = i === playIdx;
-    const col = isPlay ? "#c0143c" : "#111";
+    const col = isPlay || n.live ? "#c0143c" : "#111";
 
     if (n.rest) {
       // 온쉼표(넷째 줄 위 막대) 또는 breath
@@ -569,10 +561,12 @@ function drawScoreSheet({ notes, meta, onBlob }) {
 
   // 제목
   ctx.fillStyle = "#111"; ctx.textAlign = "center";
-  ctx.font = `64px ${SERIF}`; ctx.fillText("SCREAM SCORE", cx, 90);
-  // 가사 한 줄
+  ctx.font = `64px ${SERIF}`; ctx.fillText("aakbo", cx, 90);
   const ll = lyricLine(notes);
-  ctx.font = `22px ${SERIF}`; ctx.fillText(ll, cx, 130);
+  if (ll) {
+    ctx.font = `22px ${SERIF}`;
+    ctx.fillText(ll, cx, 130);
+  }
   // 빠르기말
   ctx.textAlign = "left"; ctx.font = `bold 17px ${SERIF}`;
   ctx.fillText(meta.tempo, padX, 195);
@@ -659,18 +653,14 @@ function staffYC(midi, top, staffH) {
 }
 
 function IdleView({ onStart, inIframe }) {
-  const demoMeta = { tempo: "Molto drammatico", bpm: 72 };
   return (
     <div style={S.sheet}>
-      <h1 style={S.bigTitle}>SCREAM SCORE</h1>
-      <p style={S.lyricSub}>아아아아아아악!보 아아아아아아 - 아아아아 - 아아악 보</p>
-      <div style={S.demoScore}>
-        <ScoreSheet notes={DEMO_NOTES} meta={demoMeta} W={760} showHeader />
+      <h1 style={S.brandTitle}>aakbo</h1>
+      <div style={S.scoreStage}>
+        <ScoreSheet notes={[]} meta={{ tempo: "", bpm: 72 }} W={760} showHeader={false} minStaffLines={PREPARED_STAFF_LINES} />
       </div>
-      <p style={S.footerLine}>— for one scream and breath —</p>
-      <p style={S.aakboName}>악!보 <span style={{color:"#aaa", letterSpacing:3}}>aakbo</span></p>
       {inIframe && (<div style={S.iframeNote}>⚠️ 미리보기(iframe)에선 마이크가 막혀요. <b>새 창(↗) 또는 배포 주소</b>에서 열어주세요.</div>)}
-      <button style={S.btnMain} onClick={onStart}>🎤 한 번의 비명을 채보하기</button>
+      <button style={S.btnMain} onClick={onStart}>악!보</button>
     </div>
   );
 }
@@ -678,8 +668,11 @@ function IdleView({ onStart, inIframe }) {
 function RecordView({ notes, level, elapsed, onStop }) {
   return (
     <div style={S.sheet}>
-      <p style={S.recLabel}>● 기록 중  {elapsed.toFixed(1)}s</p>
-      <div style={S.liveScore}><ScoreSheet notes={notes} meta={{tempo:"…",bpm:72}} W={760} showHeader={false} /></div>
+      <h1 style={S.brandTitleSmall}>aakbo</h1>
+      <p style={S.recLabel}>● {elapsed.toFixed(1)}s</p>
+      <div style={S.liveScore}>
+        <ScoreSheet notes={notes} meta={{ tempo: "", bpm: 72 }} W={760} showHeader={false} minStaffLines={PREPARED_STAFF_LINES} />
+      </div>
       <div style={S.meterMini}><div style={{ ...S.meterFill, width: `${level * 100}%` }} /></div>
       <button style={S.btnStop} onClick={onStop}>■ 채보 끝내기</button>
     </div>
@@ -690,9 +683,10 @@ function DoneView({ notes, meta, r, onReset, onSave, onCopy, saving, voice, onVo
   return (
     <>
       <div style={S.sheet} className="pop">
-        <h1 style={S.bigTitle}>SCREAM SCORE</h1>
-        <p style={S.lyricSub}>{lyricLine(notes)}</p>
-        <div style={S.doneScore}><ScoreSheet notes={notes} meta={meta} W={760} playIdx={playIdx} showHeader /></div>
+        <h1 style={S.brandTitle}>aakbo</h1>
+        <div style={S.doneScore}>
+          <ScoreSheet notes={notes} meta={meta} W={760} playIdx={playIdx} showHeader minStaffLines={PREPARED_STAFF_LINES} />
+        </div>
         <p style={S.footerLine}>— {meta.footer} —</p>
         <div style={S.playerBox}>
           <div style={S.voiceRow}>
@@ -740,24 +734,23 @@ function DeniedView({ diag, inIframe, isSecure, hasMic, onReset }) {
 
 const MONO = "'Courier New', ui-monospace, monospace";
 const S = {
-  page: { minHeight: "100vh", background: "#d8d4c8", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "28px 14px", fontFamily: SERIF },
-  frame: { width: "100%", maxWidth: 440 },
-  sheet: { background: "#fff", padding: "30px 24px 26px", boxShadow: "0 16px 50px rgba(0,0,0,0.28)" },
+  page: { minHeight: "100vh", background: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "20px 14px", fontFamily: SERIF },
+  frame: { width: "100%", maxWidth: 480 },
+  sheet: { background: "#fff", padding: "22px 18px 20px", boxShadow: "0 8px 32px rgba(0,0,0,0.1)", border: "1px solid #eee" },
   center: { background: "#fff", padding: "48px 24px", textAlign: "center", boxShadow: "0 16px 50px rgba(0,0,0,0.28)" },
   armText: { fontSize: 16, color: "#111", letterSpacing: 1, textAlign: "center", fontFamily: SERIF },
 
-  bigTitle: { textAlign: "center", fontSize: 40, fontWeight: 400, letterSpacing: 4, color: "#111", margin: "0 0 6px", fontFamily: SERIF },
-  lyricSub: { textAlign: "center", fontSize: 12.5, color: "#222", margin: "0 0 18px", fontFamily: SERIF, lineHeight: 1.5 },
-  demoScore: { margin: "8px 0" },
-  liveScore: { margin: "4px 0 12px", maxHeight: 360, overflowY: "auto" },
-  doneScore: { margin: "8px 0", maxHeight: 380, overflowY: "auto" },
+  brandTitle: { textAlign: "center", fontSize: 34, fontWeight: 400, letterSpacing: 6, color: "#111", margin: "0 0 14px", fontFamily: SERIF },
+  brandTitleSmall: { textAlign: "center", fontSize: 22, fontWeight: 400, letterSpacing: 4, color: "#111", margin: "0 0 8px", fontFamily: SERIF },
+  scoreStage: { margin: "0 0 18px", background: "#fff" },
+  liveScore: { margin: "0 0 12px", maxHeight: 420, overflowY: "auto", background: "#fff" },
+  doneScore: { margin: "0 0 8px", maxHeight: 420, overflowY: "auto", background: "#fff" },
   footerLine: { textAlign: "center", fontSize: 12, fontStyle: "italic", color: "#333", margin: "14px 0 6px", fontFamily: SERIF },
-  aakboName: { textAlign: "center", fontSize: 18, fontWeight: 700, color: "#111", margin: "2px 0 22px", fontFamily: SERIF },
 
   iframeNote: { border: "1.5px dashed #111", padding: "12px 14px", fontSize: 11.5, lineHeight: 1.7, color: "#333", marginBottom: 18, textAlign: "left", fontFamily: MONO },
   recLabel: { textAlign: "center", fontSize: 12, letterSpacing: 1, color: "#c0143c", fontWeight: 700, marginBottom: 10, fontFamily: SERIF },
   meterMini: { height: 6, background: "#e5e0d2", borderRadius: 3, overflow: "hidden", marginBottom: 14 },
-  meterFill: { height: "100%", background: "#111", transition: "width 60ms linear" },
+  meterFill: { height: "100%", background: "#111", transition: "width 40ms linear" },
 
   playerBox: { marginTop: 16 },
   voiceRow: { display: "flex", gap: 6, marginBottom: 10 },
