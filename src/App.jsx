@@ -614,13 +614,13 @@ function drawScoreSheet({ notes, meta, onBlob }) {
   });
   const topPad = extMinY < scoreTop ? Math.ceil(scoreTop - extMinY + 18) : 0;
   const botPad = Math.max(0, Math.ceil(extMaxY - (scoreTop + totalLines * blockH) + 28));
-  const H = scoreTop + totalLines * blockH + 150 + topPad + botPad;
+  const baseH = scoreTop + totalLines * blockH + 150;
+  const H = baseH + topPad + botPad;
 
   const canvas = document.createElement("canvas");
   canvas.width = W * dpr; canvas.height = H * dpr;
   const ctx = canvas.getContext("2d"); ctx.scale(dpr, dpr);
-  ctx.translate(0, topPad);
-  ctx.fillStyle = "#ffffff"; ctx.fillRect(0, -topPad, W, H);
+  ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
   const cx = W / 2;
 
   // 제목
@@ -639,6 +639,8 @@ function drawScoreSheet({ notes, meta, onBlob }) {
   ctx.textAlign = "right"; ctx.font = `italic 14px ${SERIF}`;
   ctx.fillText("scream it from within", W - padX, 195);
 
+  ctx.save();
+  ctx.translate(0, topPad);
   // 오선/음표
   for (let li = 0; li < totalLines; li++) {
     const top = scoreTop + li * blockH + 10;
@@ -685,13 +687,13 @@ function drawScoreSheet({ notes, meta, onBlob }) {
     }
   });
 
-  // 푸터
-  const fy = H - 70;
+  const fy = baseH - 70;
   ctx.strokeStyle = "#111"; ctx.lineWidth = 0.8;
   ctx.beginPath(); ctx.moveTo(padX, fy); ctx.lineTo(W*0.34, fy); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(W*0.66, fy); ctx.lineTo(W - padX, fy); ctx.stroke();
   ctx.fillStyle = "#111"; ctx.font = `italic 16px ${SERIF}`; ctx.textAlign = "center";
   ctx.fillText(meta.footer, cx, fy + 5);
+  ctx.restore();
 
   canvas.toBlob((blob) => onBlob(blob), "image/png");
 }
